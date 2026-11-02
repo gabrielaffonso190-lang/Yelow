@@ -29,7 +29,7 @@ import { appendUploadedImageToPanel, buildSupportPanel } from './customization.j
 import { isAdmin } from './permissions.js';
 import { buildShopView, configurationSection } from './ui.js';
 
-const allowedModels = new Set(['z-ai/glm-5.3']);
+const allowedModels = new Set(['z-ai/glm-5.3', 'z-ai/glm-5.3-flash']);
 const panelOperations = new Map();
 
 function modalInput(customId, label, options = {}) {
@@ -805,7 +805,7 @@ export async function handleConfigurationModal(interaction, services) {
       const personality = interaction.fields.getTextInputValue('personality').trim();
 
       if (!allowedModels.has(model)) {
-        await replyEphemeral(interaction, 'Modelo inválido. O único modelo habilitado é z-ai/glm-5.3.');
+        await replyEphemeral(interaction, 'Modelo inválido. Use z-ai/glm-5.3 ou z-ai/glm-5.3-flash, conforme disponibilidade da conta.');
         return true;
       }
 
@@ -1009,7 +1009,7 @@ export function createAiConfigModal(ai = {}) {
     .addComponents(
       modalInput('model', 'Modelo NVIDIA', {
         value: ai.model || 'z-ai/glm-5.3',
-        placeholder: 'z-ai/glm-5.3',
+        placeholder: 'z-ai/glm-5.3 ou z-ai/glm-5.3-flash',
       }),
       modalInput('personality', 'Personalidade em português', {
         value: ai.personality || 'Tecnológica, profissional, natural, prestativa e objetiva.',

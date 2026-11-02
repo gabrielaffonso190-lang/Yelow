@@ -10,6 +10,7 @@ import { clearConversation } from './services/ai.js';
 import { recoverMatrixPanel } from './services/matrix.js';
 import { createPaymentProviders } from './services/paymentProviders.js';
 import { startPaymentWebhookServer } from './services/payments.js';
+import { startMissionMaintenance } from './services/missions.js';
 
 async function main() {
   const { token } = getDiscordConfig();
@@ -31,7 +32,7 @@ async function main() {
 
   registerReadyEvent(client);
   registerInteractionCreateEvent(client, commandMap, services);
-  registerMessageCreateEvent(client, services);
+  registerMessageCreateEvent(client, services, commandMap);
   client.on(Events.Error, (error) => {
     console.error(`Erro no cliente Discord (${error.name}).`);
   });
@@ -55,6 +56,7 @@ async function main() {
       console.error(`Falha ao iniciar webhook Z.PAY (${errorName}).`);
     }
 
+    startMissionMaintenance({ client, db });
     recoverCustomizationSessions({ db, client }).catch((error) => {
       console.error(`Falha ao recuperar sessões (${error.name || 'UnknownError'}).`);
     });

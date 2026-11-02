@@ -1,4 +1,5 @@
 import { pingCommand } from './ping.js';
+import { missionsCommand } from './missions.js';
 import { healtyCommand } from './healty.js';
 import { announcementCommand } from './announcement.js';
 import { configCommand } from './config.js';
@@ -18,4 +19,5 @@ export const commands = [
   cartCommand,
   customizeCommand,
   conversationCommand,
+  missionsCommand,
 ];

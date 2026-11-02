@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
-import { getRequiredEnv } from '../config/env.js';
 import {
   getGuildSettings,
   updateGuildSettings,
@@ -10,9 +9,9 @@ import {
 import { listProducts } from './commerce.js';
 import { isGuildAdmin, isGuildStaff } from './permissions.js';
 import { createSupportTicket } from './customization.js';
+import { resolveAvailableNvidiaModel } from './nvidia.js';
 
 const endpoint = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const allowedModels = new Set(['z-ai/glm-5.3']);
 const maximumHistoryMessages = 12;
 const maximumMessageLength = 4000;
 const maximumReplyLength = 1800;
@@ -378,10 +377,14 @@ export async function respondToMessage({
   }
 
   consumeRateLimit(user.id);
-  const model = settings.ai?.model || 'z-ai/glm-5.3';
-
-  if (!allowedModels.has(model)) {
-    throw new AiServiceError('O modelo configurado para a IA não é permitido.');
+  const preferredModel = settings.ai?.model || 'z-ai/glm-5.3';
+  let model;
+  try {
+    model = await resolveAvailableNvidiaModel(preferredModel, apiKey);
+  } catch (error) {
+    throw new AiServiceError(error instanceof Error
+      ? error.message
+      : 'Não foi possível verificar os modelos NVIDIA disponíveis.');
   }
 
   const userText = content.trim().slice(0, maximumMessageLength);
@@ -403,7 +406,7 @@ export async function respondToMessage({
 
   try {
     finalMessage = await requestCompletion(
-      getRequiredEnv('NVIDIA_API_KEY'),
+      apiKey,
       model,
       messages,
       controller.signal,
@@ -447,7 +450,7 @@ export async function respondToMessage({
       }
 
       finalMessage = await requestCompletion(
-        getRequiredEnv('NVIDIA_API_KEY'),
+        apiKey,
         model,
         messages,
         controller.signal,
@@ -486,7 +489,8 @@ export async function respondToMessage({
     : '';
 
   return {
-    content: `${reply}${extra}${draftNotice}`.slice(0, maximumReplyLength),
+    content: `${model !== preferredModel ? `_(Modelo disponível nesta conta: ${model}.)_\n` : ''}${reply}${extra}${draftNotice}`
+      .slice(0, maximumReplyLength),
     components: draftId ? responseComponents(draftId) : [],
   };
 }

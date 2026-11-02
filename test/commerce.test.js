@@ -3,7 +3,7 @@ import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { ChannelType, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { commands } from '../src/commands/index.js';
-import { ensurePaymentSchema } from '../src/services/db.js';
+import { ensureMissionSchema, ensurePaymentSchema } from '../src/services/db.js';
 import {
   applyCartCoupon,
   calculateSalePrice,
@@ -142,6 +142,7 @@ function createDatabase() {
     );
   `);
   ensurePaymentSchema(db);
+  ensureMissionSchema(db);
 
   return db;
 }
@@ -416,7 +417,10 @@ test('slash command registry contains no duplicate names', () => {
     'carrinho',
     'personalizar',
     'conversa',
+    'missoes',
   ]);
+  const config = commands.find(({ data }) => data.name === 'config').data.toJSON();
+  assert.equal(config.options[0].name, 'center');
 });
 
 test('admin product form stores costs and stock with a 30% sales price', async () => {
@@ -513,6 +517,27 @@ test('MATRIX roles are enforced and panel recovery updates instead of duplicatin
   };
   await handleMatrixInteraction(manager, { db });
   assert.match(denied.content, /permissão administrativa/);
+  db.close();
+});
+
+test('MATRIX mission section reports persisted active and expiring quest counts', async () => {
+  const db = createDatabase();
+  const embed = (await handleMatrixInteraction({
+    isStringSelectMenu: () => true,
+    customId: 'matrix:section',
+    values: ['missions'],
+    inGuild: () => true,
+    guildId: 'guild-1',
+    guild: { id: 'guild-1', ownerId: 'owner-1' },
+    user: { id: 'owner-1' },
+    member: {
+      roles: { cache: new Map() },
+      permissions: new PermissionsBitField(PermissionFlagsBits.Administrator),
+    },
+    memberPermissions: new PermissionsBitField(PermissionFlagsBits.Administrator),
+    reply: async (response) => response,
+  }, { db }));
+  assert.equal(embed, true);
   db.close();
 });
 

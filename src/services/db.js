@@ -21,6 +21,160 @@ const requiredTables = [
   'tickets',
 ];
 
+function createBaseSchema(db) {
+  db.exec(`
+    CREATE TABLE products (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'Geral',
+      price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+      cost_cents INTEGER CHECK (cost_cents IS NULL OR cost_cents >= 0),
+      image_asset_id TEXT,
+      stock INTEGER CHECK (stock IS NULL OR stock >= 0),
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      created_at TEXT NOT NULL,
+      UNIQUE (guild_id, name)
+    );
+    CREATE TABLE carts (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      coupon_code TEXT,
+      checkout_order_id TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id)
+    );
+    CREATE TABLE cart_items (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      product_id TEXT NOT NULL REFERENCES products(id),
+      quantity INTEGER NOT NULL CHECK (quantity BETWEEN 1 AND 99),
+      unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+      PRIMARY KEY (guild_id, user_id, product_id),
+      FOREIGN KEY (guild_id, user_id) REFERENCES carts(guild_id, user_id)
+        ON DELETE CASCADE
+    );
+    CREATE TABLE orders (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'in_service', 'cancelled')),
+      subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
+      discount_cents INTEGER NOT NULL CHECK (discount_cents >= 0),
+      total_cents INTEGER NOT NULL CHECK (total_cents >= 0),
+      coupon_code TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE order_items (
+      order_id TEXT NOT NULL REFERENCES orders(id),
+      product_id TEXT NOT NULL,
+      product_name TEXT NOT NULL,
+      unit_price_cents INTEGER NOT NULL,
+      quantity INTEGER NOT NULL CHECK (quantity BETWEEN 1 AND 99),
+      PRIMARY KEY (order_id, product_id)
+    );
+    CREATE TABLE tickets (
+      order_id TEXT PRIMARY KEY REFERENCES orders(id),
+      guild_id TEXT NOT NULL,
+      channel_id TEXT UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('creating', 'open', 'closed')),
+      opened_at TEXT NOT NULL,
+      closed_at TEXT
+    );
+    CREATE TABLE support_tickets (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      channel_id TEXT UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('creating', 'open', 'closed')),
+      opened_at TEXT NOT NULL,
+      closed_at TEXT
+    );
+    CREATE TABLE coupons (
+      id TEXT NOT NULL UNIQUE,
+      guild_id TEXT NOT NULL,
+      code TEXT NOT NULL,
+      discount_type TEXT NOT NULL CHECK (discount_type IN ('percent', 'fixed')),
+      discount_value INTEGER NOT NULL CHECK (discount_value > 0),
+      valid_from TEXT,
+      valid_until TEXT,
+      max_uses INTEGER CHECK (max_uses IS NULL OR max_uses > 0),
+      min_cents INTEGER NOT NULL DEFAULT 0 CHECK (min_cents >= 0),
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      created_by TEXT NOT NULL,
+      PRIMARY KEY (guild_id, code)
+    );
+    CREATE TABLE coupon_uses (
+      guild_id TEXT NOT NULL,
+      coupon_id TEXT NOT NULL,
+      coupon_code TEXT NOT NULL,
+      order_id TEXT NOT NULL UNIQUE REFERENCES orders(id),
+      user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, coupon_id, order_id)
+    );
+    CREATE TABLE inventory_reservations (
+      order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      product_id TEXT NOT NULL REFERENCES products(id),
+      quantity INTEGER NOT NULL CHECK (quantity BETWEEN 1 AND 99),
+      PRIMARY KEY (order_id, product_id)
+    );
+    CREATE TABLE guild_config (
+      guild_id TEXT PRIMARY KEY,
+      settings TEXT NOT NULL DEFAULT '{}',
+      staff_role_ids TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE audit_logs (
+      id INTEGER PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      details TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE customization_sessions (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      channel_id TEXT UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('creating', 'active', 'closed')),
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE image_assets (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      session_id TEXT NOT NULL REFERENCES customization_sessions(id),
+      file_path TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE conversations (
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      messages TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, channel_id, user_id)
+    );
+    CREATE TABLE action_drafts (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      target TEXT NOT NULL,
+      value TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'rejected', 'expired')),
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+}
+
 export function openDatabase(path = process.env.DATABASE_PATH || 'data/vintermod.sqlite') {
   const resolvedPath = resolve(path);
   mkdirSync(dirname(resolvedPath), { recursive: true, mode: 0o700 });
@@ -28,9 +182,15 @@ export function openDatabase(path = process.env.DATABASE_PATH || 'data/vintermod
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA busy_timeout = 5000');
 
-  const tables = new Set(db.prepare(
+  let tables = new Set(db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table'",
   ).all().map(({ name }) => name));
+  if (!tables.size) {
+    createBaseSchema(db);
+    tables = new Set(db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table'",
+    ).all().map(({ name }) => name));
+  }
   const missingTables = requiredTables.filter((table) => !tables.has(table));
 
   if (missingTables.length > 0) {
@@ -62,9 +222,54 @@ export function openDatabase(path = process.env.DATABASE_PATH || 'data/vintermod
       created_at TEXT NOT NULL
     )
   `);
+  ensureMissionSchema(db);
   ensurePaymentSchema(db);
 
   return db;
+}
+
+export function ensureMissionSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS missions (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      promoted_content TEXT NOT NULL,
+      quest_type TEXT NOT NULL CHECK (quest_type IN ('play', 'video')),
+      requirements TEXT NOT NULL,
+      reward TEXT NOT NULL,
+      ends_at TEXT NOT NULL,
+      platforms TEXT NOT NULL,
+      official_url TEXT,
+      instructions TEXT,
+      banner_url TEXT,
+      source_url TEXT NOT NULL,
+      last_verified_at TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('active', 'ended', 'unavailable')),
+      alert_sent_at TEXT,
+      created_by TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      announcement_channel_id TEXT,
+      announced_message_id TEXT,
+      announcement_status TEXT NOT NULL DEFAULT 'none'
+        CHECK (announcement_status IN ('none', 'publishing', 'published')),
+      CHECK (official_url IS NOT NULL OR instructions IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS idx_missions_guild_status_ends
+      ON missions(guild_id, status, ends_at);
+    CREATE INDEX IF NOT EXISTS idx_missions_reminders
+      ON missions(status, ends_at, alert_sent_at);
+  `);
+  const missionColumns = new Set(db.prepare('PRAGMA table_info(missions)')
+    .all().map(({ name }) => name));
+  if (!missionColumns.has('announcement_status')) {
+    db.exec(`
+      ALTER TABLE missions ADD COLUMN announcement_status TEXT NOT NULL DEFAULT 'none'
+        CHECK (announcement_status IN ('none', 'publishing', 'published'))
+    `);
+  }
 }
 
 export function ensurePaymentSchema(db) {

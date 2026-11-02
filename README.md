@@ -5,7 +5,7 @@ Bot modular para Discord, em Node.js 22.9+ com discord.js v14 e ES Modules.
 ## Funcionalidades
 
 - `/ping`, `/healty`, `/config center`, `/comprar`, `/carrinho`,
-  `/personalizar` e `/conversa limpar`.
+  `/personalizar`, `/conversa limpar` e `/missoes`.
 - Configuração por servidor, catálogo editável, estoque, carrinhos, cupons,
   pedidos e tickets privados persistidos no SQLite existente.
 - Painel MATRIX persistente no canal configurado (por padrão,
@@ -20,10 +20,14 @@ Bot modular para Discord, em Node.js 22.9+ com discord.js v14 e ES Modules.
   correspondente quando disponível; imagens próprias enviadas pela equipe têm
   precedência.
 - IA por menção, com histórico limitado, ferramentas explícitas e propostas de
-  alteração sujeitas à aprovação da equipe.
+  alteração sujeitas à aprovação da equipe. A aplicação consulta os modelos
+  disponíveis na conta NVIDIA e usa GLM 5.3 Flash somente se estiver listado.
 - Sessões privadas de personalização com prazo de 15 minutos e armazenamento
   local privado de imagens enviadas no Discord.
-- Prefixo `!vinter ping` (legado; o nome deste comando ainda não foi migrado).
+- Comandos por prefixo `!vanta` e `!yelow` (mantém `!vinter` como alias) e
+  menção ao bot para perguntas à IA ou execução dos comandos compatíveis.
+- VANTA MISSIONS com cadastro e verificação manual, anúncios, prazo, alertas
+  automáticos e histórico de auditoria. Não consulta nem automatiza Quests.
 
 Pix pelas APIs documentadas da Z.PAY e da VoxPay está integrado ao fluxo
 existente de pedidos. Z.PAY é o provedor principal por padrão e VoxPay é o
@@ -37,7 +41,8 @@ Robux/GamePass são encaminhados à equipe para confirmação.
   [Discord Developer Portal](https://discord.com/developers/applications).
 - `DISCORD_TOKEN` e o intent **Message Content Intent** habilitado para a IA por
   menção e o prefixo.
-- O arquivo SQLite existente em `data/vintermod.sqlite`. O caminho pode ser
+- SQLite em `data/vintermod.sqlite`; um banco vazio recebe o schema base, e os
+  bancos existentes recebem somente migrações aditivas. O caminho pode ser
   substituído com `DATABASE_PATH`.
 - `NVIDIA_API_KEY` para conversar com o provedor de IA.
 - `ZPAY_CLIENT_ID` e `ZPAY_CLIENT_SECRET` para criar cobranças Pix.
@@ -60,6 +65,9 @@ opcional e limita o registro ao servidor de desenvolvimento.
 `MATRIX_CHANNEL_ID` pode substituir o canal padrão do painel MATRIX. Convide o
 bot com os escopos `bot` e `applications.commands`, além das permissões
 necessárias para criar canais privados, gerenciar canais e enviar mensagens.
+Habilite **Message Content Intent** para a IA por menção e comandos por prefixo.
+Configure permissões de DM para receber respostas privadas aos comandos de
+prefixo.
 
 ## Execução
 
@@ -69,8 +77,26 @@ npm run deploy:commands
 npm start
 ```
 
-`npm run deploy:commands` publica os comandos para o Discord; execute apenas
-quando quiser atualizar o registro. `npm run dev` inicia o modo watch.
+`npm run deploy:commands` publica a lista atualizada de slash commands para o
+Discord; execute após a primeira instalação ou quando os comandos mudarem.
+`/config center` já é um comando slash com subcomando `center`. `npm run dev`
+inicia o modo watch.
+
+Comandos de prefixo suportados: `!vanta ajuda`, `!vanta ping`, `!vanta healty`,
+`!vanta conversa limpar`, `!vanta missoes listar`, `!vanta comprar`,
+`!vanta personalizar` e `/anuncio` como `!vanta anuncio preparar`.
+`!yelow` é um alias. Os comandos `/config center` e `/carrinho` continuam
+exclusivamente slash para manter seus painéis privados/interativos. As respostas
+privadas por prefixo são enviadas por DM; `!vanta comprar` e a prévia de anúncio
+permanecem no canal para que seus botões funcionem. Também é possível mencionar
+o bot, por exemplo `@VANTA ping` ou `@VANTA missoes listar`; uma menção seguida
+de texto livre continua sendo uma conversa com a IA.
+
+Para cadastrar uma Quest por prefixo, use argumentos `chave="valor"`:
+
+```text
+!vanta missoes cadastrar nome="Quest oficial" conteudo="Jogo" tipo=play requisitos="Jogar 15 minutos" recompensa="Item oficial" encerramento="2026-12-31T23:59-03:00" plataformas="Windows, macOS" fonte="https://discord.com/blog/fonte" como_encontrar="Abra Discord > Quests"
+```
 
 No primeiro `/comprar` ou `/config center`, o catálogo inicial é inserido
 somente para produtos que ainda não existem no servidor. Os estoques definidos
@@ -88,10 +114,30 @@ configuração administrativa. As ações interativas também validam permissão
 servidor.
 
 O comando `/healty` exibe latência, uptime, memória, CPU e estado do SQLite e
-das integrações sem revelar credenciais. O estado da IA não é uma verificação
-ao vivo do provedor. Relatórios financeiros, histórico `/minhas-compras`,
-feedback e missões ainda não estão implementados. O MATRIX identifica recursos
-indisponíveis. O gerenciador de anúncios está disponível por `/anuncio preparar`.
+das integrações sem revelar credenciais. A seção MATRIX de Missões mostra
+contagens atuais. Relatórios financeiros, histórico `/minhas-compras` e
+feedback ainda não estão implementados. O gerenciador de anúncios está
+disponível por `/anuncio preparar`.
+
+## VANTA MISSIONS
+
+Use `/missoes cadastrar`, `/missoes atualizar`, `/missoes listar`,
+`/missoes encerrar`, `/missoes anunciar` e `/missoes alertas`. Somente
+administradores autorizados podem gerenciar dados e publicar. Cada cadastro
+exige uma fonte HTTPS oficial e um link oficial da Quest ou instruções para
+encontrá-la; a equipe é responsável por verificar a fonte e confirmar a
+recompensa. O sistema registra quem verificou e quando.
+
+Configure o canal de encerramento com `/missoes alertas canal:#canal`. O bot
+avisa uma vez quando uma Quest ativa entra nas 24 horas finais, encerra Quests
+expiradas e impede que elas sejam anunciadas. Atualizar a Quest registra nova
+verificação e permite atualizar seu anúncio existente.
+
+Os anúncios incluem imagem/banner, requisitos, recompensa informada, prazo,
+plataformas, fonte e botão “Ver Quest no Discord”. Se não houver um link direto,
+o botão mostra as instruções registradas. O cadastro é exclusivamente manual:
+não há integração de consulta oficial presumida, leitura não autorizada,
+aceitação automática, gameplay ou progresso simulado.
 
 O MATRIX mostra contagens diretamente das tabelas atuais. O schema de pedidos
 rastreia tentativas de cobrança em uma tabela aditiva `payments`; o estado do
@@ -133,10 +179,10 @@ registro idempotente: se o resultado de uma tentativa ficar incerto, o bot
 bloqueia uma segunda publicação do mesmo rascunho e pede verificação manual no
 canal antes de preparar outro.
 
-O provedor de IA usa o endpoint OpenAI-compatible da NVIDIA e o modelo
-`z-ai/glm-5.3`, sujeito à disponibilidade da conta. Erros HTTP, limites e
-timeouts são tratados sem registrar a chave. O modelo Flash não é oferecido
-sem confirmação de acesso.
+O provedor de IA usa o endpoint OpenAI-compatible da NVIDIA. Antes da chamada,
+consulta `/v1/models`; prefere `z-ai/glm-5.3` e recorre a
+`z-ai/glm-5.3-flash` somente quando a conta lista esse modelo. Erros HTTP,
+limites e timeouts são tratados sem registrar a chave.
 
 As artes do catálogo podem ser regeneradas com `npm run build:product-art`.
 Elas são composições gráficas próprias, sem logotipos oficiais de terceiros.
@@ -152,6 +198,9 @@ quando um membro autorizado as seleciona e publica.
 
 ## Limitações externas
 
+- Para a chave testada nesta auditoria, o catálogo NVIDIA listou
+  `z-ai/glm-5.3-flash`, mas não `z-ai/glm-5.3`; a IA escolhe o Flash. A
+  consulta de modelos não substitui um teste de geração de chat.
 - As credenciais Z.PAY/VoxPay ainda precisam ser configuradas e não houve
   validação com uma cobrança real. A tentativa de consulta VoxPay anterior
   retornou `401 invalid_api_key`, portanto confira/revogue a chave no painel.
@@ -159,12 +208,22 @@ quando um membro autorizado as seleciona e publica.
   registrada, mas a equipe continua responsável pelo atendimento/entrega.
 - O bot não expõe comandos Discord para simular pagamentos Sandbox; a API de
   simulação fica disponível apenas no adaptador Z.PAY em modo Sandbox.
-- O login do bot também foi recusado como `TokenInvalid` na última tentativa.
-  Confira o Secret `DISCORD_TOKEN` no ambiente e reinicie o Codespace; não
-  compartilhe seu valor.
+- `npm start` usa o `DISCORD_TOKEN` do `.env` local quando o arquivo existe;
+  sem `.env`, usa o Secret de ambiente. O `.env` é excluído do pacote Discloud.
 - É preciso configurar custos reais dos produtos antes de disponibilizá-los
   para compra. Robux e GamePass aguardam confirmação manual de preço.
 - A configuração da IA não comprova disponibilidade da chave, do endpoint ou
   do modelo na conta; valide no ambiente antes de anunciar a função como ativa.
 - O SQLite local exige armazenamento persistente no ambiente de execução. Os
   uploads também dependem da persistência de `data/private-images`.
+
+## Deploy na Discloud
+
+O repositório inclui `discloud.config` (bot Node.js LTS, entrada
+`src/start.js`, `npm start`, 512 MB) e `.discloudignore`, que exclui segredos,
+dependências locais e testes sem descartar `data/`. Configure os Secrets no
+painel da Discloud antes de iniciar. Faça backup do SQLite e de
+`data/private-images` e use armazenamento persistente da plataforma: os arquivos
+locais são essenciais para preservar pedidos, configurações e imagens. O schema
+é inicializado somente quando o banco está vazio; um banco existente não é
+recriado nem limpo.

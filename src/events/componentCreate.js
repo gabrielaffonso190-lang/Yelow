@@ -34,6 +34,7 @@ import {
 import { handleDraftInteraction } from '../services/ai.js';
 import { handleMatrixInteraction } from '../services/matrix.js';
 import { handleAnnouncementInteraction } from '../services/announcements.js';
+import { handleMissionViewInteraction } from '../services/missions.js';
 import {
   buildPixMessage,
   createOrderPayment,
@@ -454,6 +455,10 @@ export async function handleComponentInteraction(interaction, services) {
 
   if (customId.startsWith('announcement:')) {
     return handleAnnouncementInteraction(interaction, db);
+  }
+
+  if (customId.startsWith('missions:')) {
+    return handleMissionViewInteraction(interaction, db);
   }
 
   if (customId.startsWith('draft:')) {

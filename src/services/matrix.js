@@ -7,6 +7,7 @@ import {
 import { getGuildSettings, updateGuildSettings, writeAuditLog } from './db.js';
 import { BRAND, withBrandSignature } from '../config/brand.js';
 import { isAdmin, isStaff } from './permissions.js';
+import { getAvailableNvidiaModels } from './nvidia.js';
 
 export const DEFAULT_MATRIX_CHANNEL_ID = '1560463567025606677';
 
@@ -41,8 +42,8 @@ function row(component) {
   return new ActionRowBuilder().addComponents(component);
 }
 
-function metric(db, query, guildId) {
-  return db.prepare(query).get(guildId).count;
+function metric(db, query, ...parameters) {
+  return db.prepare(query).get(...parameters).count;
 }
 
 function metrics(db, guildId) {
@@ -205,7 +206,28 @@ function buildMetricsEmbed(db, guildId, section) {
   }
 
   if (section === 'missions') {
-    embed.setDescription('O sistema de missões não está implementado.');
+    const active = metric(
+      db,
+      `SELECT COUNT(*) AS count FROM missions
+       WHERE guild_id = ? AND status = 'active' AND ends_at > ?`,
+      guildId,
+      new Date().toISOString(),
+    );
+    const expiring = metric(
+      db,
+      `SELECT COUNT(*) AS count FROM missions
+       WHERE guild_id = ? AND status = 'active'
+         AND ends_at > ? AND ends_at <= ?`,
+      guildId,
+      new Date().toISOString(),
+      new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    );
+    embed.setDescription([
+      `Quests ativas e válidas: **${active}**`,
+      `Encerram em até 24 horas: **${expiring}**`,
+      'Gestão manual e anúncios: `/missoes cadastrar`, `/missoes atualizar`, `/missoes anunciar`.',
+      'Nenhuma API pública oficial de consulta é presumida.',
+    ].join('\n'));
     return embed;
   }
 
@@ -335,11 +357,38 @@ export async function buildHealthEmbed({
     databaseStatus = { label: 'Indisponível', detail: `Falha de consulta (${errorName}).` };
   }
 
-  const aiStatus = settings.ai?.enabled === false
-    ? { label: 'Não configurado', detail: 'IA desativada neste servidor.' }
-    : env.NVIDIA_API_KEY?.trim()
-      ? { label: 'Degradado', detail: 'Credencial definida; disponibilidade do provedor não verificada.' }
-      : { label: 'Não configurado', detail: 'NVIDIA_API_KEY ausente.' };
+  let aiStatus;
+  if (settings.ai?.enabled === false) {
+    aiStatus = { label: 'Não configurado', detail: 'IA desativada neste servidor.' };
+  } else if (!env.NVIDIA_API_KEY?.trim()) {
+    aiStatus = { label: 'Não configurado', detail: 'NVIDIA_API_KEY ausente.' };
+  } else {
+    try {
+      const availableModels = await getAvailableNvidiaModels({
+        apiKey: env.NVIDIA_API_KEY,
+      });
+      const preferredModel = settings.ai?.model || 'z-ai/glm-5.3';
+      const selectedModel = availableModels.includes(preferredModel)
+        ? preferredModel
+        : availableModels.includes('z-ai/glm-5.3-flash')
+          ? 'z-ai/glm-5.3-flash'
+          : null;
+      aiStatus = selectedModel
+        ? {
+          label: 'Disponível',
+          detail: `Modelo ${selectedModel} listado para esta conta; a geração de resposta não foi testada pelo diagnóstico.`,
+        }
+        : {
+          label: 'Indisponível',
+          detail: 'Nenhum dos modelos GLM compatíveis está listado para esta conta NVIDIA.',
+        };
+    } catch (error) {
+      aiStatus = {
+        label: 'Degradado',
+        detail: error instanceof Error ? error.message : 'Não foi possível consultar os modelos NVIDIA.',
+      };
+    }
+  }
   const discordStatus = !client.isReady()
     ? { label: 'Indisponível', detail: 'Cliente Discord não está pronto.' }
     : ping < 0 || ping > 500

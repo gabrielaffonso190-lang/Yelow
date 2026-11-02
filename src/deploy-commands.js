@@ -1,6 +1,9 @@
 import { REST, Routes } from 'discord.js';
 import { commands } from './commands/index.js';
 import { getDeployConfig } from './config/env.js';
+import { loadLocalDiscordToken } from './config/loadLocalEnv.js';
+
+loadLocalDiscordToken();
 
 async function main() {
   const { token, clientId, guildId } = getDeployConfig();
