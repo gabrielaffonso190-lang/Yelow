@@ -1,0 +1,132 @@
+[
+  {
+    "name": "Spotify Premium — 1 mês",
+    "category": "Spotify Premium",
+    "image": "spotify-premium/spotify-premium-1-mes.png"
+  },
+  {
+    "name": "Spotify Premium — 3 meses",
+    "category": "Spotify Premium",
+    "image": "spotify-premium/spotify-premium-3-meses.png"
+  },
+  {
+    "name": "Spotify Premium — anual",
+    "category": "Spotify Premium",
+    "image": "spotify-premium/spotify-premium-anual.png"
+  },
+  {
+    "name": "Conta Spotify — 1 mês",
+    "category": "Contas Spotify",
+    "image": "contas-spotify/conta-spotify-1-mes.png"
+  },
+  {
+    "name": "Conta Spotify — 3 meses",
+    "category": "Contas Spotify",
+    "image": "contas-spotify/conta-spotify-3-meses.png"
+  },
+  {
+    "name": "YouTube Premium por link — 1 mês",
+    "category": "YouTube Premium",
+    "image": "youtube-premium/youtube-premium-por-link-1-mes.png"
+  },
+  {
+    "name": "YouTube Premium na própria conta — 1 mês",
+    "category": "YouTube Premium",
+    "image": "youtube-premium/youtube-premium-na-propria-conta-1-mes.png"
+  },
+  {
+    "name": "Robux",
+    "category": "Robux",
+    "image": "robux/robux.png"
+  },
+  {
+    "name": "Discord Nitro",
+    "category": "Discord Nitro",
+    "image": "discord-nitro/discord-nitro.png"
+  },
+  {
+    "name": "Conta Discord — 2015",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2015.png"
+  },
+  {
+    "name": "Conta Discord — 2016",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2016.png"
+  },
+  {
+    "name": "Conta Discord — 2017",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2017.png"
+  },
+  {
+    "name": "Conta Discord — 2018",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2018.png"
+  },
+  {
+    "name": "Conta Discord — 2019",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2019.png"
+  },
+  {
+    "name": "Conta Discord — 2020",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2020.png"
+  },
+  {
+    "name": "Conta Discord — 2021",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2021.png"
+  },
+  {
+    "name": "Conta Discord — 2022",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2022.png"
+  },
+  {
+    "name": "Conta Discord — 2023",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2023.png"
+  },
+  {
+    "name": "Conta Discord — 2024",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2024.png"
+  },
+  {
+    "name": "Conta Discord — 2025",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2025.png"
+  },
+  {
+    "name": "Conta Discord — 2026",
+    "category": "Contas Discord",
+    "image": "contas-discord/conta-discord-2026.png"
+  },
+  {
+    "name": "Impulsos de servidor — 2x",
+    "category": "Impulsos de servidor",
+    "image": "impulsos-de-servidor/impulsos-de-servidor-2x.png"
+  },
+  {
+    "name": "Impulsos de servidor — 4x",
+    "category": "Impulsos de servidor",
+    "image": "impulsos-de-servidor/impulsos-de-servidor-4x.png"
+  },
+  {
+    "name": "Impulsos de servidor — 6x",
+    "category": "Impulsos de servidor",
+    "image": "impulsos-de-servidor/impulsos-de-servidor-6x.png"
+  },
+  {
+    "name": "Impulsos de servidor — 14x",
+    "category": "Impulsos de servidor",
+    "image": "impulsos-de-servidor/impulsos-de-servidor-14x.png"
+  },
+  {
+    "name": "GamePass — solicitação personalizada",
+    "category": "GamePass",
+    "image": "gamepass/gamepass-solicitacao-personalizada.png"
+  }
+]

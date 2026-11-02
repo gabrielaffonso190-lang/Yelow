@@ -1,0 +1,21 @@
+{
+  "name": "vanta-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.9.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "dev": "node --env-file-if-exists=.env --watch src/index.js",
+    "deploy:commands": "node --env-file-if-exists=.env src/deploy-commands.js",
+    "build:product-art": "node src/scripts/generate-product-art.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@isnouu/zpay-sdk": "^0.1.0",
+    "discord.js": "^14.19.3",
+    "sharp": "^0.34.3"
+  }
+}

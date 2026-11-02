@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+file_.env
+coverage/
+npm-debug.log*
+data/*.sqlite
+data/*.sqlite-*
+data/private-images/
