@@ -136,7 +136,7 @@ async function dispatchMessageCommand(message, commandMap, services, parsed) {
   if (parsed.name === 'ajuda') {
     await message.reply([
       '**Prefixos VANTA:** `!vanta` e `!yelow`',
-      '`ping`, `healty`, `conversa limpar`, `missoes listar`, `missoes cadastrar`, `comprar`, `personalizar`, `anuncio preparar`',
+      '`ping`, `healty`, `conversa limpar`, `missoes listar`, `missoes cadastrar`, `missoes fontes`, `missoes descobrir`, `missoes teste`, `comprar`, `personalizar`, `anuncio preparar`',
       'Para comandos com várias opções, use `chave="valor"`; respostas privadas chegam por DM.',
       'O Config Center privado é `/config center`; menções com texto livre conversam com a IA.',
     ].join('\n'));

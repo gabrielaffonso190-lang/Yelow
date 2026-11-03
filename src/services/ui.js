@@ -21,6 +21,10 @@ import { getProductImagePath } from '../config/productImages.js';
 import { getCartTotals, formatMoney, listProducts } from './commerce.js';
 import { getGuildSettings } from './db.js';
 import { appendUploadedImageToPanel } from './customization.js';
+import {
+  getEffectiveMissionDiscoveryInterval,
+  getMissionDiscoveryStatus,
+} from './missionDiscovery.js';
 
 const sectionLabels = {
   tickets: 'Tickets',
@@ -44,9 +48,9 @@ const sectionLabels = {
 const unavailableSections = {
   carts: 'Consulta de carrinhos pelo painel administrativo não está implementada.',
   orders: 'O schema registra pedidos pendentes, em atendimento e cancelados; pagamentos e conclusão não estão implementados.',
-  payments: 'Pix Z.PAY está disponível no checkout. O adaptador VoxPay aguarda confirmação da documentação.',
-  ads: 'O gerenciador de anúncios ainda não está implementado.',
-  missions: 'O sistema de missões ainda não está implementado.',
+  payments: 'Z.PAY e VoxPay estão integrados ao checkout; configure credenciais válidas para habilitá-los.',
+  ads: 'Use `/anuncio preparar` para criar e confirmar publicações administrativas.',
+  missions: 'Configure fontes, canal, aprovação, intervalo e menções da divulgação de Quests.',
   general: 'Configure os canais, cargos e integrações nas seções disponíveis.',
 };
 
@@ -54,17 +58,17 @@ function row(component) {
   return new ActionRowBuilder().addComponents(component);
 }
 
-function configEmbed(guildId, settings, staffRoleIds, section = null) {
+function configEmbed(db, guildId, settings, staffRoleIds, section = null) {
   const title = section ? sectionLabels[section] : 'Config Center';
   const values = [
     `Equipe: ${staffRoleIds.length ? staffRoleIds.map((id) => `<@&${id}>`).join(', ') : 'sem cargos configurados'}`,
     `Canal de tickets: ${settings.ticketCategoryId ? `<#${settings.ticketCategoryId}>` : 'não definido'}`,
     `Canal de compras: ${settings.shopChannelId ? `<#${settings.shopChannelId}>` : 'não definido'}`,
     `Canal de logs: ${settings.logChannelId ? `<#${settings.logChannelId}>` : 'não definido'}`,
-    `IA: ${settings.ai?.enabled === false ? 'desativada' : 'disponível quando NVIDIA_API_KEY estiver configurada'}`,
+    `IA: ${settings.ai?.enabled === false ? 'desativada' : 'NVIDIA com fallback GPT-5 mini do Huehue'}`,
   ];
 
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(BRAND.colors.white)
     .setTitle(title)
     .setDescription(section
@@ -73,6 +77,46 @@ function configEmbed(guildId, settings, staffRoleIds, section = null) {
       : 'Escolha uma área para configurar. Os valores são salvos por servidor.')
     .addFields({ name: 'Configuração atual', value: values.join('\n') })
     .setFooter({ text: `Servidor ${guildId} · ${BRAND.signature}` });
+
+  if (section === 'missions') {
+    const { sources, candidateCount } = getMissionDiscoveryStatus(db);
+    const publishFailures = db.prepare(`
+      SELECT COUNT(*) AS count FROM audit_logs
+      WHERE guild_id = ? AND action = 'mission.auto_publish_failed'
+    `).get(guildId).count;
+    const sourceLines = sources.map((source) => {
+      const state = source.status === 'operational'
+        ? 'operacional'
+        : source.status === 'degraded'
+          ? `falha (${source.failure_count})`
+          : 'cadastro manual';
+      const checked = source.last_checked_at
+        ? `<t:${Math.floor(Date.parse(source.last_checked_at) / 1000)}:R>`
+        : 'ainda não consultada';
+      const error = source.last_error ? ` · ${source.last_error.slice(0, 100)}` : '';
+      return `• ${source.source_name}: ${state} · última consulta ${checked}${error}`;
+    });
+    embed.addFields(
+      {
+        name: 'Automação de anúncios',
+        value: [
+          `Estado: ${settings.missionAutomationEnabled ? 'ativada' : 'desativada'}`,
+          `Canal: ${settings.missionAnnouncementChannelId ? `<#${settings.missionAnnouncementChannelId}>` : 'não configurado'}`,
+          `Consulta: ${settings.missionDiscoveryIntervalMinutes ?? 60} min neste servidor · ${getEffectiveMissionDiscoveryInterval(db)} min efetivos no feed compartilhado`,
+          `Aprovação da equipe: ${settings.missionRequireApproval === false ? 'não exigida' : 'exigida'}`,
+          `Menções permitidas: ${(settings.missionAllowedRoleIds ?? []).length}`,
+          `Falhas de publicação automática: ${publishFailures}`,
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: 'Fontes e verificação',
+        value: [...sourceLines, `Candidatas aguardando revisão: ${candidateCount}`].join('\n').slice(0, 1000),
+        inline: false,
+      },
+    );
+  }
+  return embed;
 }
 
 export function configurationPanel(db, guildId) {
@@ -83,7 +127,7 @@ export function configurationPanel(db, guildId) {
     .addOptions(Object.entries(sectionLabels).map(([value, label]) => ({ value, label })));
 
   return {
-    embeds: [configEmbed(guildId, settings, staffRoleIds)],
+    embeds: [configEmbed(db, guildId, settings, staffRoleIds)],
     components: [row(select)],
   };
 }
@@ -249,6 +293,42 @@ function sectionComponents(section, db, guildId) {
       .setCustomId('cfg:channel:customizationCategoryId')
       .setPlaceholder('Categoria das sessões de personalização')
       .setChannelTypes(ChannelType.GuildCategory)));
+  } else if (section === 'missions') {
+    rows.push(row(new ChannelSelectMenuBuilder()
+      .setCustomId('cfg:channel:missionAnnouncementChannelId')
+      .setPlaceholder('Canal de anúncios de VANTA MISSIONS')
+      .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      .setMinValues(0)));
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('cfg:mission:auto')
+        .setLabel(settings.missionAutomationEnabled ? 'Desativar publicação automática' : 'Ativar publicação automática')
+        .setStyle(settings.missionAutomationEnabled ? ButtonStyle.Danger : ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('cfg:mission:approval')
+        .setLabel(settings.missionRequireApproval === false ? 'Exigir aprovação da equipe' : 'Dispensar aprovação')
+        .setStyle(settings.missionRequireApproval === false ? ButtonStyle.Secondary : ButtonStyle.Primary),
+    ));
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('cfg:mission:interval')
+        .setLabel('Intervalo de consulta')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId('cfg:mission:mentions')
+        .setLabel('Menções permitidas')
+        .setStyle(ButtonStyle.Secondary),
+    ));
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('cfg:mission:preview')
+        .setLabel('Testar formato')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('cfg:mission:check')
+        .setLabel('Consultar fontes agora')
+        .setStyle(ButtonStyle.Secondary),
+    ));
   }
 
   return rows;
@@ -262,7 +342,7 @@ export function configurationSection(db, guildId, section) {
   const { settings, staffRoleIds } = getGuildSettings(db, guildId);
 
   return {
-    embeds: [configEmbed(guildId, settings, staffRoleIds, section)],
+    embeds: [configEmbed(db, guildId, settings, staffRoleIds, section)],
     components: sectionComponents(section, db, guildId),
   };
 }

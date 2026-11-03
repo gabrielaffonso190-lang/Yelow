@@ -20,14 +20,15 @@ Bot modular para Discord, em Node.js 22.9+ com discord.js v14 e ES Modules.
   correspondente quando disponível; imagens próprias enviadas pela equipe têm
   precedência.
 - IA por menção, com histórico limitado, ferramentas explícitas e propostas de
-  alteração sujeitas à aprovação da equipe. A aplicação consulta os modelos
-  disponíveis na conta NVIDIA e usa GLM 5.3 Flash somente se estiver listado.
+  alteração sujeitas à aprovação da equipe. Usa NVIDIA GPT-OSS e, se esse
+  provedor falhar, o fallback GPT-5 mini do Huehue.
 - Sessões privadas de personalização com prazo de 15 minutos e armazenamento
   local privado de imagens enviadas no Discord.
 - Comandos por prefixo `!vanta` e `!yelow` (mantém `!vinter` como alias) e
   menção ao bot para perguntas à IA ou execução dos comandos compatíveis.
-- VANTA MISSIONS com cadastro e verificação manual, anúncios, prazo, alertas
-  automáticos e histórico de auditoria. Não consulta nem automatiza Quests.
+- VANTA MISSIONS com descoberta de artigos no RSS oficial do Discord Blog,
+  revisão manual de candidatas, cards VANTA, publicação opcional, prazo,
+  alertas e métricas MATRIX. Discord Discover e Newsroom continuam manuais.
 
 Pix pelas APIs documentadas da Z.PAY e da VoxPay está integrado ao fluxo
 existente de pedidos. Z.PAY é o provedor principal por padrão e VoxPay é o
@@ -44,7 +45,8 @@ Robux/GamePass são encaminhados à equipe para confirmação.
 - SQLite em `data/vintermod.sqlite`; um banco vazio recebe o schema base, e os
   bancos existentes recebem somente migrações aditivas. O caminho pode ser
   substituído com `DATABASE_PATH`.
-- `NVIDIA_API_KEY` para conversar com o provedor de IA.
+- `NVIDIA_API_KEY` para a IA principal. `HUEHUE_API_KEY` habilita o fallback
+  GPT-5 mini pelo endpoint oficial informado do Huehue.
 - `ZPAY_CLIENT_ID` e `ZPAY_CLIENT_SECRET` para criar cobranças Pix.
 - `ZPAY_ENVIRONMENT` pode ser `production` (padrão) ou `sandbox`.
 - `VOXPAY_API_KEY` para habilitar VoxPay como provedor alternativo.
@@ -68,6 +70,13 @@ necessárias para criar canais privados, gerenciar canais e enviar mensagens.
 Habilite **Message Content Intent** para a IA por menção e comandos por prefixo.
 Configure permissões de DM para receber respostas privadas aos comandos de
 prefixo.
+Configure `HUEHUE_API_KEY` nos Secrets para o fallback da IA; nunca coloque a
+chave no código ou em mensagens. Um HTTP 401 do Huehue significa que a chave ou
+o acesso à API precisa ser corrigido no painel do provedor.
+`.env.example` inclui IDs das application emojis VANTA. São IDs públicos dos
+emojis da aplicação, não chaves; os 29 IDs foram confirmados com o Discord.
+O bot usa esses IDs por padrão, aceita substituições por ID ou nome e não exige
+copiá-los para `.env`.
 
 ## Execução
 
@@ -83,7 +92,8 @@ Discord; execute após a primeira instalação ou quando os comandos mudarem.
 inicia o modo watch.
 
 Comandos de prefixo suportados: `!vanta ajuda`, `!vanta ping`, `!vanta healty`,
-`!vanta conversa limpar`, `!vanta missoes listar`, `!vanta comprar`,
+`!vanta conversa limpar`, `!vanta missoes listar`, `!vanta missoes fontes`,
+`!vanta missoes descobrir`, `!vanta missoes teste`, `!vanta comprar`,
 `!vanta personalizar` e `/anuncio` como `!vanta anuncio preparar`.
 `!yelow` é um alias. Os comandos `/config center` e `/carrinho` continuam
 exclusivamente slash para manter seus painéis privados/interativos. As respostas
@@ -122,21 +132,41 @@ disponível por `/anuncio preparar`.
 ## VANTA MISSIONS
 
 Use `/missoes cadastrar`, `/missoes atualizar`, `/missoes listar`,
-`/missoes encerrar`, `/missoes anunciar` e `/missoes alertas`. Somente
-administradores autorizados podem gerenciar dados e publicar. Cada cadastro
-exige uma fonte HTTPS oficial e um link oficial da Quest ou instruções para
-encontrá-la; a equipe é responsável por verificar a fonte e confirmar a
-recompensa. O sistema registra quem verificou e quando.
+`/missoes encerrar`, `/missoes anunciar`, `/missoes alertas`,
+`/missoes fontes` e `/missoes descobrir`. Somente administradores autorizados
+podem gerenciar dados e publicar. Cada cadastro exige uma fonte HTTPS oficial
+e um link oficial da Quest ou instruções para encontrá-la; a equipe confirma
+requisitos, recompensa, prazo e plataformas, e o bot registra a verificação.
 
 Configure o canal de encerramento com `/missoes alertas canal:#canal`. O bot
 avisa uma vez quando uma Quest ativa entra nas 24 horas finais, encerra Quests
 expiradas e impede que elas sejam anunciadas. Atualizar a Quest registra nova
 verificação e permite atualizar seu anúncio existente.
 
-Os anúncios incluem imagem/banner, requisitos, recompensa informada, prazo,
-plataformas, fonte e botão “Ver Quest no Discord”. Se não houver um link direto,
-o botão mostra as instruções registradas. O cadastro é exclusivamente manual:
-não há integração de consulta oficial presumida, leitura não autorizada,
+O Config Center > Missões permite escolher o canal, ativar/desativar publicação
+automática, ajustar a consulta (15 a 1.440 minutos), exigir aprovação, limitar
+menções a cargos existentes e testar uma prévia privada. A publicação
+automática só envia Quests cadastradas e verificadas recentemente; com
+aprovação exigida, a equipe publica por `/missoes anunciar`.
+
+O bot consulta `https://discord.com/blog/rss.xml`, feed RSS público oficial,
+para encontrar artigos que mencionem Quest. Esses artigos são apenas candidatas:
+não garantem que uma promoção esteja ativa nem contêm necessariamente seus
+requisitos, recompensas ou validade. Nenhuma candidata é convertida ou
+anunciada automaticamente como Quest; a equipe confirma os dados e cadastra.
+Discord Discover → Quests não tem API pública documentada de consulta, e o
+Discord Newsroom não apresentou um feed estruturado estável; ambos são exibidos
+como fontes de conferência manual no Config Center, no MATRIX e em
+`/missoes fontes`. A indisponibilidade do RSS é registrada sem parar o bot.
+
+Cards usam banner fornecido pela equipe após validação HTTPS, tipo e tamanho;
+a origem e o identificador da imagem ficam registrados. Se não há banner, o
+bot gera um PNG próprio em preto, branco e cinza com a identidade VANTA. Os
+anúncios mostram requisitos, recompensa, prazo, plataformas, fonte, data da
+última verificação e botão “Ver Quest no Discord”. Quests expiradas são
+encerradas e o anúncio existente é atualizado; alterações de dados atualizam a
+mensagem original. A deduplicação usa identificador persistente e fingerprint
+da fonte/conteúdo. Não há uso de endpoints privados, tokens de usuário,
 aceitação automática, gameplay ou progresso simulado.
 
 O MATRIX mostra contagens diretamente das tabelas atuais. O schema de pedidos
@@ -179,17 +209,21 @@ registro idempotente: se o resultado de uma tentativa ficar incerto, o bot
 bloqueia uma segunda publicação do mesmo rascunho e pede verificação manual no
 canal antes de preparar outro.
 
-O provedor de IA usa o endpoint OpenAI-compatible da NVIDIA. Antes da chamada,
-consulta `/v1/models`; prefere `z-ai/glm-5.3` e recorre a
-`z-ai/glm-5.3-flash` somente quando a conta lista esse modelo. Erros HTTP,
+O provedor principal usa o endpoint OpenAI-compatible da NVIDIA com
+`openai/gpt-oss-20b`; esse modelo aberto não é o produto ChatGPT. Se a NVIDIA
+falhar ou não estiver configurada, o bot chama `POST
+https://huehue.app/v1/chatgpt` com `HUEHUE_API_KEY` e o campo JSON `mensagem`.
+O Huehue informa que usa GPT-5 mini e inicia uma conversa nova por chamada;
+por isso, o bot inclui um resumo limitado da conversa no prompt de fallback.
+Ferramentas da VANTA (consultas de pedidos, catálogo e propostas de alteração)
+continuam disponíveis somente quando a NVIDIA responde. HTTP, autenticação,
 limites e timeouts são tratados sem registrar a chave.
 
 As artes do catálogo podem ser regeneradas com `npm run build:product-art`.
 Elas são composições gráficas próprias, sem logotipos oficiais de terceiros.
-Emojis da aplicação são opcionais: configure os nomes reais usando
-`VANTA_EMOJI_*` depois que o bot puder consultar a aplicação. O código não
-presume IDs, e os componentes não recebem emoji quando um nome configurado não
-existe.
+Emojis da aplicação usam os IDs VANTA validados e permitem substituir cada um
+com `VANTA_EMOJI_*`. Se um emoji não estiver disponível para a aplicação,
+componentes continuam válidos sem esse emoji.
 
 Uploads são aceitos apenas dentro de sessões de personalização. O conteúdo é
 validado por assinatura binária, limitado a 8 MB e armazenado em
@@ -198,9 +232,11 @@ quando um membro autorizado as seleciona e publica.
 
 ## Limitações externas
 
-- Para a chave testada nesta auditoria, o catálogo NVIDIA listou
-  `z-ai/glm-5.3-flash`, mas não `z-ai/glm-5.3`; a IA escolhe o Flash. A
-  consulta de modelos não substitui um teste de geração de chat.
+- A conta NVIDIA lista `openai/gpt-oss-20b`, mas testes recentes de geração
+  expiraram; catálogo disponível não comprova que o modelo esteja respondendo.
+- A chamada de teste do Huehue retornou HTTP 401 para a credencial atualmente
+  configurada. O fallback está implementado, mas exige uma chave Huehue válida
+  e acesso autorizado para funcionar.
 - As credenciais Z.PAY/VoxPay ainda precisam ser configuradas e não houve
   validação com uma cobrança real. A tentativa de consulta VoxPay anterior
   retornou `401 invalid_api_key`, portanto confira/revogue a chave no painel.
@@ -212,8 +248,8 @@ quando um membro autorizado as seleciona e publica.
   sem `.env`, usa o Secret de ambiente. O `.env` é excluído do pacote Discloud.
 - É preciso configurar custos reais dos produtos antes de disponibilizá-los
   para compra. Robux e GamePass aguardam confirmação manual de preço.
-- A configuração da IA não comprova disponibilidade da chave, do endpoint ou
-  do modelo na conta; valide no ambiente antes de anunciar a função como ativa.
+- O health check não consome chamadas de geração; valide a IA mencionando o bot
+  depois de configurar chaves válidas para os provedores.
 - O SQLite local exige armazenamento persistente no ambiente de execução. Os
   uploads também dependem da persistência de `data/private-images`.
 

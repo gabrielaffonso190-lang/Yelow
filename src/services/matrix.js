@@ -7,7 +7,15 @@ import {
 import { getGuildSettings, updateGuildSettings, writeAuditLog } from './db.js';
 import { BRAND, withBrandSignature } from '../config/brand.js';
 import { isAdmin, isStaff } from './permissions.js';
-import { getAvailableNvidiaModels } from './nvidia.js';
+import {
+  DEFAULT_NVIDIA_MODEL,
+  getAvailableNvidiaModels,
+} from './nvidia.js';
+import { emojiComponent } from '../config/emojis.js';
+import {
+  getEffectiveMissionDiscoveryInterval,
+  getMissionDiscoveryStatus,
+} from './missionDiscovery.js';
 
 export const DEFAULT_MATRIX_CHANNEL_ID = '1560463567025606677';
 
@@ -206,6 +214,8 @@ function buildMetricsEmbed(db, guildId, section) {
   }
 
   if (section === 'missions') {
+    const { settings } = getGuildSettings(db, guildId);
+    const { sources, candidateCount } = getMissionDiscoveryStatus(db);
     const active = metric(
       db,
       `SELECT COUNT(*) AS count FROM missions
@@ -222,11 +232,32 @@ function buildMetricsEmbed(db, guildId, section) {
       new Date().toISOString(),
       new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     );
+    const published = metric(
+      db,
+      `SELECT COUNT(*) AS count FROM missions
+       WHERE guild_id = ? AND announcement_status = 'published'`,
+      guildId,
+    );
+    const publicationFailures = metric(
+      db,
+      `SELECT COUNT(*) AS count FROM audit_logs
+       WHERE guild_id = ? AND action = 'mission.auto_publish_failed'`,
+      guildId,
+    );
+    const failures = sources.reduce((total, source) => total + source.failure_count, 0);
+    const blog = sources.find((source) => source.source_key === 'discord_blog');
     embed.setDescription([
       `Quests ativas e válidas: **${active}**`,
       `Encerram em até 24 horas: **${expiring}**`,
-      'Gestão manual e anúncios: `/missoes cadastrar`, `/missoes atualizar`, `/missoes anunciar`.',
-      'Nenhuma API pública oficial de consulta é presumida.',
+      `Quests publicadas neste servidor: **${published}**`,
+      `Falhas de publicação automática: **${publicationFailures}**`,
+      `Candidatas aguardando revisão: **${candidateCount}** · falhas de consulta registradas: **${failures}**`,
+      `Automação: **${settings.missionAutomationEnabled ? 'ativada' : 'desativada'}** · canal: ${settings.missionAnnouncementChannelId ? `<#${settings.missionAnnouncementChannelId}>` : 'não configurado'}`,
+      `Aprovação da equipe: **${settings.missionRequireApproval === false ? 'não exigida' : 'exigida'}** · intervalo: **${settings.missionDiscoveryIntervalMinutes ?? 60} min** neste servidor; **${getEffectiveMissionDiscoveryInterval(db)} min** efetivos no feed`,
+      `Última consulta automática: ${blog?.last_checked_at ? `<t:${Math.floor(Date.parse(blog.last_checked_at) / 1000)}:R>` : 'nunca'} · próxima: ${blog?.next_check_at ? `<t:${Math.floor(Date.parse(blog.next_check_at) / 1000)}:R>` : 'não agendada'}`,
+      ...(blog?.last_error ? [`Última falha do feed: ${blog.last_error.slice(0, 200)}`] : []),
+      'Discord Blog RSS: descoberta automática de artigos, não prova de Quest. Discord Discover → Quests e Discord Newsroom: revisão manual.',
+      'Gerenciar: `/config center` · `/missoes fontes` · `/missoes cadastrar`.',
     ].join('\n'));
     return embed;
   }
@@ -241,6 +272,7 @@ export function buildMatrixPanel() {
     .addOptions(Object.entries(sectionLabels).map(([value, label]) => ({
       label,
       value,
+      ...(emojiComponent(value) ? { emoji: emojiComponent(value) } : {}),
     })));
 
   return {
@@ -358,35 +390,48 @@ export async function buildHealthEmbed({
   }
 
   let aiStatus;
+  const huehueConfigured = Boolean(env.HUEHUE_API_KEY?.trim());
   if (settings.ai?.enabled === false) {
     aiStatus = { label: 'Não configurado', detail: 'IA desativada neste servidor.' };
   } else if (!env.NVIDIA_API_KEY?.trim()) {
-    aiStatus = { label: 'Não configurado', detail: 'NVIDIA_API_KEY ausente.' };
+    aiStatus = huehueConfigured
+      ? {
+        label: 'Degradado',
+        detail: 'NVIDIA_API_KEY ausente; HUEHUE_API_KEY configurada, conectividade não verificada.',
+      }
+      : { label: 'Não configurado', detail: 'Configure NVIDIA_API_KEY ou HUEHUE_API_KEY.' };
   } else {
     try {
       const availableModels = await getAvailableNvidiaModels({
         apiKey: env.NVIDIA_API_KEY,
       });
-      const preferredModel = settings.ai?.model || 'z-ai/glm-5.3';
-      const selectedModel = availableModels.includes(preferredModel)
-        ? preferredModel
-        : availableModels.includes('z-ai/glm-5.3-flash')
-          ? 'z-ai/glm-5.3-flash'
-          : null;
+      const selectedModel = availableModels.includes(DEFAULT_NVIDIA_MODEL)
+        ? DEFAULT_NVIDIA_MODEL
+        : null;
       aiStatus = selectedModel
         ? {
-          label: 'Disponível',
-          detail: `Modelo ${selectedModel} listado para esta conta; a geração de resposta não foi testada pelo diagnóstico.`,
+          label: 'Degradado',
+          detail: `Modelo ${selectedModel} listado; geração não verificada.${huehueConfigured ? ' Fallback Huehue configurado, conectividade não verificada.' : ''}`,
+        }
+        : huehueConfigured
+          ? {
+            label: 'Degradado',
+            detail: `O modelo ${DEFAULT_NVIDIA_MODEL} não está listado; fallback Huehue configurado, conectividade não verificada.`,
+          }
+          : {
+            label: 'Indisponível',
+            detail: `O modelo ${DEFAULT_NVIDIA_MODEL} não está listado para esta conta NVIDIA.`,
+          };
+    } catch (error) {
+      aiStatus = huehueConfigured
+        ? {
+          label: 'Degradado',
+          detail: `Falha ao consultar NVIDIA; fallback Huehue configurado, conectividade não verificada (${error instanceof Error ? error.name : 'UnknownError'}).`,
         }
         : {
-          label: 'Indisponível',
-          detail: 'Nenhum dos modelos GLM compatíveis está listado para esta conta NVIDIA.',
+          label: 'Degradado',
+          detail: error instanceof Error ? error.message : 'Não foi possível consultar os modelos NVIDIA.',
         };
-    } catch (error) {
-      aiStatus = {
-        label: 'Degradado',
-        detail: error instanceof Error ? error.message : 'Não foi possível consultar os modelos NVIDIA.',
-      };
     }
   }
   const discordStatus = !client.isReady()

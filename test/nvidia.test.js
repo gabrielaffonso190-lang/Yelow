@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   clearNvidiaModelCache,
+  DEFAULT_NVIDIA_MODEL,
   getAvailableNvidiaModels,
   resolveAvailableNvidiaModel,
 } from '../src/services/nvidia.js';
 
-test('model discovery returns only supported GLM IDs and never prints credentials', async () => {
+test('model discovery returns only the account-supported OpenAI GPT-OSS model', async () => {
   clearNvidiaModelCache();
   const models = await getAvailableNvidiaModels({
     apiKey: 'sensitive-test-key',
@@ -16,45 +17,46 @@ test('model discovery returns only supported GLM IDs and never prints credential
       assert.equal(options.headers.Authorization, 'Bearer sensitive-test-key');
       return Response.json({
         data: [
+          { id: 'openai/gpt-oss-20b' },
           { id: 'z-ai/glm-5.3-flash' },
           { id: 'unrelated/model' },
-          { id: 'z-ai/glm-5.3-flash' },
+          { id: 'openai/gpt-oss-20b' },
         ],
       });
     },
   });
-  assert.deepEqual(models, ['z-ai/glm-5.3-flash']);
+  assert.deepEqual(models, [DEFAULT_NVIDIA_MODEL]);
 });
 
-test('primary GLM falls back only to a model explicitly available to the account', async () => {
+test('GPT-OSS is selected when available and legacy GLM preferences cannot select Flash', async () => {
   clearNvidiaModelCache();
   const selected = await resolveAvailableNvidiaModel(
-    'z-ai/glm-5.3',
+    DEFAULT_NVIDIA_MODEL,
     'test-key',
     {
       forceRefresh: true,
       fetchImpl: async () => Response.json({
-        data: [{ id: 'z-ai/glm-5.3-flash' }],
+        data: [{ id: 'openai/gpt-oss-20b' }, { id: 'z-ai/glm-5.3-flash' }],
       }),
     },
   );
-  assert.equal(selected, 'z-ai/glm-5.3-flash');
+  assert.equal(selected, DEFAULT_NVIDIA_MODEL);
 
   clearNvidiaModelCache();
-  const primary = await resolveAvailableNvidiaModel(
-    'z-ai/glm-5.3',
+  const migratedPreference = await resolveAvailableNvidiaModel(
+    'z-ai/glm-5.3-flash',
     'test-key',
     {
       forceRefresh: true,
       fetchImpl: async () => Response.json({
-        data: [{ id: 'z-ai/glm-5.3' }, { id: 'z-ai/glm-5.3-flash' }],
+        data: [{ id: 'openai/gpt-oss-20b' }, { id: 'z-ai/glm-5.3-flash' }],
       }),
     },
   );
-  assert.equal(primary, 'z-ai/glm-5.3');
+  assert.equal(migratedPreference, DEFAULT_NVIDIA_MODEL);
 });
 
-test('model discovery surfaces rejected access and does not fall back without model access', async () => {
+test('model discovery surfaces rejected access and unavailable GPT-OSS access', async () => {
   clearNvidiaModelCache();
   await assert.rejects(getAvailableNvidiaModels({
     apiKey: 'test-key',
@@ -64,11 +66,13 @@ test('model discovery surfaces rejected access and does not fall back without mo
 
   clearNvidiaModelCache();
   await assert.rejects(resolveAvailableNvidiaModel(
-    'z-ai/glm-5.3',
+    DEFAULT_NVIDIA_MODEL,
     'test-key',
     {
       forceRefresh: true,
-      fetchImpl: async () => Response.json({ data: [{ id: 'unrelated/model' }] }),
+      fetchImpl: async () => Response.json({
+        data: [{ id: 'z-ai/glm-5.3-flash' }, { id: 'unrelated/model' }],
+      }),
     },
-  ), /Nenhum dos modelos GLM compatíveis/);
+  ), /openai\/gpt-oss-20b não está disponível/);
 });

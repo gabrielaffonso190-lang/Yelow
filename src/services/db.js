@@ -270,6 +270,74 @@ export function ensureMissionSchema(db) {
         CHECK (announcement_status IN ('none', 'publishing', 'published'))
     `);
   }
+  const additiveColumns = [
+    ['source_name', 'TEXT'],
+    ['source_published_at', 'TEXT'],
+    ['image_source', 'TEXT'],
+    ['image_source_url', 'TEXT'],
+    ['image_identifier', 'TEXT'],
+    ['campaign_fingerprint', 'TEXT'],
+    ['announcement_updated_at', 'TEXT'],
+  ];
+  for (const [column, type] of additiveColumns) {
+    if (!missionColumns.has(column)) {
+        db.exec(`ALTER TABLE missions ADD COLUMN ${column} ${type}`);
+    }
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_missions_guild_fingerprint
+        ON missions(guild_id, campaign_fingerprint)
+        WHERE campaign_fingerprint IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS mission_discovery_sources (
+        source_key TEXT PRIMARY KEY,
+        source_name TEXT NOT NULL,
+        source_url TEXT,
+        access_mode TEXT NOT NULL CHECK (access_mode IN ('automatic', 'manual')),
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_checked_at TEXT,
+        next_check_at TEXT,
+        last_success_at TEXT,
+        last_error TEXT,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        entries_found INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS mission_discovery_entries (
+        id TEXT PRIMARY KEY,
+        source_key TEXT NOT NULL REFERENCES mission_discovery_sources(source_key),
+        external_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        published_at TEXT,
+        image_url TEXT,
+        status TEXT NOT NULL DEFAULT 'review'
+          CHECK (status IN ('review', 'imported', 'ignored')),
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        UNIQUE (source_key, external_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mission_discovery_review
+        ON mission_discovery_entries(status, first_seen_at DESC);
+    CREATE TABLE IF NOT EXISTS mission_discovery_entry_history (
+        id INTEGER PRIMARY KEY,
+        entry_id TEXT NOT NULL REFERENCES mission_discovery_entries(id),
+        previous_title TEXT NOT NULL,
+        previous_summary TEXT NOT NULL,
+        next_title TEXT NOT NULL,
+        next_summary TEXT NOT NULL,
+        changed_at TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO mission_discovery_sources (
+        source_key, source_name, source_url, access_mode, status, last_error
+    ) VALUES
+        ('discord_discover_quests', 'Discord Discover → Quests', NULL, 'manual', 'manual',
+          'Consulta automatizada indisponível: não há API pública documentada de Quests.'),
+        ('discord_blog', 'Discord Blog (RSS oficial)', 'https://discord.com/blog/rss.xml',
+          'automatic', 'pending', NULL),
+        ('discord_newsroom', 'Discord Newsroom', 'https://discord.com/newsroom',
+          'manual', 'manual',
+          'Página pública sem feed estruturado estável confirmado para campanhas de Quests.');
+  `);
 }
 
 export function ensurePaymentSchema(db) {

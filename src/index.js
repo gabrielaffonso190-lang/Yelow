@@ -11,6 +11,7 @@ import { recoverMatrixPanel } from './services/matrix.js';
 import { createPaymentProviders } from './services/paymentProviders.js';
 import { startPaymentWebhookServer } from './services/payments.js';
 import { startMissionMaintenance } from './services/missions.js';
+import { startMissionDiscovery } from './services/missionDiscovery.js';
 
 async function main() {
   const { token } = getDiscordConfig();
@@ -57,6 +58,7 @@ async function main() {
     }
 
     startMissionMaintenance({ client, db });
+    startMissionDiscovery({ client, db });
     recoverCustomizationSessions({ db, client }).catch((error) => {
       console.error(`Falha ao recuperar sessões (${error.name || 'UnknownError'}).`);
     });

@@ -11,7 +11,7 @@
     "dev": "node --watch src/start.js",
     "deploy:commands": "node src/deploy-commands.js",
     "build:product-art": "node src/scripts/generate-product-art.js",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
     "@isnouu/zpay-sdk": "^0.1.0",

@@ -1,14 +1,21 @@
 import { ChannelType, SlashCommandBuilder } from 'discord.js';
 import {
+  buildMissionAnnouncementPreview,
   configureMissionAlerts,
   createMission,
   listMissions,
   MissionError,
   publishMission,
   setMissionStatus,
+  syncMissionAnnouncementStatus,
   updateMission,
 } from '../services/missions.js';
 import { isAdmin } from '../services/permissions.js';
+import { getGuildSettings } from '../services/db.js';
+import {
+  checkMissionDiscoverySources,
+  getMissionDiscoveryStatus,
+} from '../services/missionDiscovery.js';
 
 const questTypeChoices = [
   { name: 'Play Quest', value: 'play' },
@@ -74,7 +81,12 @@ function addQuestFields(command, required) {
       .setMaxLength(1000))
     .addStringOption((option) => option
       .setName('banner')
-      .setDescription('URL HTTPS do banner')
+      .setDescription('URL HTTPS do banner oficial ou da imagem enviada pela equipe')
+      .setRequired(false)
+      .setMaxLength(512))
+    .addStringOption((option) => option
+      .setName('fonte_imagem')
+      .setDescription('URL HTTPS da página de origem oficial do banner (opcional)')
       .setRequired(false)
       .setMaxLength(512));
 }
@@ -92,6 +104,7 @@ function readQuestFields(interaction) {
     officialUrl: interaction.options.getString('link_oficial'),
     instructions: interaction.options.getString('como_encontrar'),
     bannerUrl: interaction.options.getString('banner'),
+    imageSourceUrl: interaction.options.getString('fonte_imagem'),
   };
 }
 
@@ -168,23 +181,99 @@ export const missionsCommand = {
         .setRequired(false))
       .addBooleanOption((option) => option
         .setName('remover')
-        .setDescription('Remove o canal de alertas configurado.'))),
+        .setDescription('Remove o canal de alertas configurado.')))
+    .addSubcommand((subcommand) => subcommand
+      .setName('fontes')
+      .setDescription('Mostra fontes autorizadas e Quests candidatas para revisão.'))
+    .addSubcommand((subcommand) => subcommand
+      .setName('descobrir')
+      .setDescription('Consulta agora o feed público oficial do Discord Blog.'))
+    .addSubcommand((subcommand) => subcommand
+      .setName('teste')
+      .setDescription('Exibe uma prévia do card visual VANTA sem publicar campanha real.')),
 
   async execute(interaction, { db }) {
     if (!interaction.inGuild()) {
       await interaction.reply({ content: 'Use este comando em um servidor.', ephemeral: true });
       return;
     }
-    if (!isAdmin(interaction, db)) {
+    const subcommand = interaction.options.getSubcommand();
+    const administrator = isAdmin(interaction, db);
+    if (!administrator && !['listar', 'fontes'].includes(subcommand)) {
       await interaction.reply({
         content: 'Somente administradores autorizados podem gerenciar Quests.',
         ephemeral: true,
       });
       return;
     }
+    if (!administrator && interaction.options.getBoolean('incluir_encerradas')) {
+      await interaction.reply({
+        content: 'Somente administradores podem consultar Quests encerradas ou indisponíveis.',
+        ephemeral: true,
+      });
+      return;
+    }
 
     try {
-      const subcommand = interaction.options.getSubcommand();
+      if (subcommand === 'fontes') {
+        const { sources, candidates, candidateCount } = getMissionDiscoveryStatus(db);
+        const sourceLines = sources.map((source) => {
+          const access = source.access_mode === 'automatic'
+            ? source.status === 'operational'
+              ? 'automática · operacional'
+              : source.status === 'degraded'
+                ? `automática · falhou ${source.failure_count} vez(es)`
+                : 'automática · ainda não consultada'
+            : 'manual · sem API pública documentada ou feed estruturado';
+          const lastChecked = source.last_checked_at
+            ? ` · consultada <t:${Math.floor(Date.parse(source.last_checked_at) / 1000)}:R>`
+            : '';
+          const error = source.last_error ? ` · ${source.last_error.slice(0, 150)}` : '';
+          return `• **${source.source_name}**: ${access}${lastChecked}${error}`;
+        });
+        const candidateLines = candidates.map((candidate) => (
+          [
+            `• [${candidate.title}](${candidate.url})`,
+            candidate.image_url ? `  Imagem do feed (verifique antes de usar): ${candidate.image_url}` : '',
+          ].filter(Boolean).join('\n')
+        ));
+        await interaction.reply({
+          content: [
+            '**Fontes oficiais VANTA MISSIONS**',
+            ...sourceLines,
+            `Candidatas do feed aguardando verificação manual: **${candidateCount}**`,
+            ...(candidateLines.length ? candidateLines : ['Nenhuma candidata aguardando revisão.']),
+            'Artigos do blog não são tratados como prova de Quest; a equipe confirma os detalhes antes de cadastrar ou anunciar.',
+          ].join('\n').slice(0, 1900),
+          ephemeral: true,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
+
+      if (subcommand === 'descobrir') {
+        await interaction.deferReply({ ephemeral: true });
+        const intervalMinutes = getGuildSettings(db, interaction.guildId)
+          .settings.missionDiscoveryIntervalMinutes ?? 60;
+        const result = await checkMissionDiscoverySources({
+          db,
+          intervalMinutes,
+          force: true,
+        });
+        await interaction.editReply(result.ok
+          ? `Consulta concluída. ${result.candidateCount ?? 0} artigo(s) relacionado(s) a Quest aguardam revisão manual.`
+          : `O feed oficial está indisponível neste momento: ${result.error}`);
+        return;
+      }
+
+      if (subcommand === 'teste') {
+        await interaction.reply({
+          ...await buildMissionAnnouncementPreview(),
+          ephemeral: true,
+        });
+        return;
+      }
+
       if (subcommand === 'cadastrar') {
         const quest = createMission(db, interaction.guildId, interaction.user.id, readQuestFields(interaction));
         await interaction.reply({
@@ -225,8 +314,23 @@ export const missionsCommand = {
           interaction.options.getString('id'),
           interaction.options.getString('situacao'),
         );
+        let announcementUpdated = false;
+        try {
+          announcementUpdated = await syncMissionAnnouncementStatus({
+            client: interaction.client,
+            quest,
+          });
+        } catch (error) {
+          const errorName = error instanceof Error ? error.name : 'UnknownError';
+          console.error(`Falha ao atualizar anúncio de Quest encerrada (${errorName}).`);
+        }
         await interaction.reply({
-          content: `Quest \`${quest.id}\` marcada como ${quest.status === 'ended' ? 'encerrada' : 'indisponível'}.`,
+          content: [
+            `Quest \`${quest.id}\` marcada como ${quest.status === 'ended' ? 'encerrada' : 'indisponível'}.`,
+            quest.announced_message_id && !announcementUpdated
+              ? 'O anúncio público não pôde ser atualizado automaticamente; confira o canal e remova o anúncio manualmente se necessário.'
+              : '',
+          ].filter(Boolean).join('\n'),
           ephemeral: true,
         });
         return;

@@ -28,8 +28,11 @@ import {
 import { appendUploadedImageToPanel, buildSupportPanel } from './customization.js';
 import { isAdmin } from './permissions.js';
 import { buildShopView, configurationSection } from './ui.js';
+import { DEFAULT_NVIDIA_MODEL } from './nvidia.js';
+import { checkMissionDiscoverySources } from './missionDiscovery.js';
+import { buildMissionAnnouncementPreview } from './missions.js';
 
-const allowedModels = new Set(['z-ai/glm-5.3', 'z-ai/glm-5.3-flash']);
+const allowedModels = new Set([DEFAULT_NVIDIA_MODEL]);
 const panelOperations = new Map();
 
 function modalInput(customId, label, options = {}) {
@@ -249,6 +252,7 @@ export async function handleConfigurationComponent(interaction, services) {
       'shopChannelId',
       'logChannelId',
       'ticketPanelChannelId',
+      'missionAnnouncementChannelId',
     ]);
     const allowedChannels = new Set([
       ChannelType.GuildCategory,
@@ -715,6 +719,69 @@ export async function handleConfigurationComponent(interaction, services) {
     return true;
   }
 
+  if (interaction.isButton() && action === 'mission') {
+    const { settings } = getGuildSettings(db, interaction.guildId);
+    if (key === 'auto' || key === 'approval') {
+      if (key === 'auto' && !settings.missionAutomationEnabled
+        && !settings.missionAnnouncementChannelId) {
+        await replyEphemeral(interaction, 'Configure primeiro o canal de anúncios de VANTA MISSIONS.');
+        return true;
+      }
+
+      const setting = key === 'auto'
+        ? 'missionAutomationEnabled'
+        : 'missionRequireApproval';
+      const nextValue = key === 'auto'
+        ? !settings.missionAutomationEnabled
+        : settings.missionRequireApproval === false;
+      updateGuildSettings(db, interaction.guildId, { [setting]: nextValue });
+      audit(interaction, db, `config.missions.${key}.updated`, { enabled: nextValue });
+      await interaction.update(configurationSection(db, interaction.guildId, 'missions'));
+      return true;
+    }
+
+    if (key === 'interval' || key === 'mentions') {
+      const modal = new ModalBuilder()
+        .setCustomId(`cfg:modal:mission${key === 'interval' ? 'Interval' : 'Mentions'}`)
+        .setTitle(key === 'interval' ? 'Intervalo de consulta' : 'Menções de VANTA MISSIONS')
+        .addComponents(key === 'interval'
+          ? modalInput('interval', 'Minutos (15 a 1.440)', {
+            value: String(settings.missionDiscoveryIntervalMinutes ?? 60),
+            maxLength: 4,
+          })
+          : modalInput('roles', 'IDs de cargos separados por vírgula', {
+            value: (settings.missionAllowedRoleIds ?? []).join(','),
+            placeholder: 'Vazio para não mencionar cargos',
+            paragraph: true,
+            required: false,
+            maxLength: 250,
+          }));
+      await interaction.showModal(modal);
+      return true;
+    }
+
+    if (key === 'preview') {
+      await interaction.reply({
+        ...await buildMissionAnnouncementPreview(),
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    if (key === 'check') {
+      await interaction.deferReply({ ephemeral: true });
+      const result = await checkMissionDiscoverySources({
+        db,
+        intervalMinutes: settings.missionDiscoveryIntervalMinutes ?? 60,
+        force: true,
+      });
+      await interaction.editReply(result.ok
+        ? `Consulta concluída. ${result.candidateCount ?? 0} artigo(s) relacionado(s) a Quest aguardam revisão manual.`
+        : `A fonte automática está indisponível: ${result.error}`);
+      return true;
+    }
+  }
+
   if (interaction.isButton() && action === 'publish') {
     const { settings } = getGuildSettings(db, interaction.guildId);
     const channelId = key === 'shop' ? settings.shopChannelId : settings.ticketPanelChannelId;
@@ -805,7 +872,7 @@ export async function handleConfigurationModal(interaction, services) {
       const personality = interaction.fields.getTextInputValue('personality').trim();
 
       if (!allowedModels.has(model)) {
-        await replyEphemeral(interaction, 'Modelo inválido. Use z-ai/glm-5.3 ou z-ai/glm-5.3-flash, conforme disponibilidade da conta.');
+        await replyEphemeral(interaction, `Modelo inválido. O modelo configurado é ${DEFAULT_NVIDIA_MODEL}.`);
         return true;
       }
 
@@ -814,6 +881,59 @@ export async function handleConfigurationModal(interaction, services) {
       });
       audit(interaction, db, 'config.ai.updated', { model });
       await replyEphemeral(interaction, 'Personalidade e modelo da IA salvos.');
+      return true;
+    }
+
+    if (parts[2] === 'missionInterval') {
+      const rawValue = interaction.fields.getTextInputValue('interval').trim();
+      if (!/^\d{1,4}$/.test(rawValue)) {
+        await replyEphemeral(interaction, 'O intervalo deve ser um número inteiro entre 15 e 1.440 minutos.');
+        return true;
+      }
+      const interval = Number(rawValue);
+      if (!Number.isSafeInteger(interval) || interval < 15 || interval > 1440) {
+        await replyEphemeral(interaction, 'O intervalo deve ser entre 15 e 1.440 minutos.');
+        return true;
+      }
+      updateGuildSettings(db, interaction.guildId, { missionDiscoveryIntervalMinutes: interval });
+      audit(interaction, db, 'config.missions.interval.updated', { intervalMinutes: interval });
+      await replyEphemeral(interaction, `Consulta de fontes configurada para cada ${interval} minutos.`);
+      return true;
+    }
+
+    if (parts[2] === 'missionMentions') {
+      const rawValue = interaction.fields.getTextInputValue('roles').trim();
+      const roleIds = rawValue
+        ? [...new Set(rawValue.split(',').map((id) => id.trim()).filter(Boolean))]
+        : [];
+      if (roleIds.length > 10
+        || roleIds.some((id) => !/^\d{17,20}$/.test(id) || id === interaction.guildId)) {
+        await replyEphemeral(interaction, 'Informe até 10 IDs de cargos válidos, separados por vírgula.');
+        return true;
+      }
+
+      for (const roleId of roleIds) {
+        let role;
+        try {
+          role = await interaction.guild.roles.fetch(roleId);
+        } catch (error) {
+          if (error?.code === 10011) {
+            await replyEphemeral(interaction, `O cargo ${roleId} não existe neste servidor.`);
+            return true;
+          }
+          throw error;
+        }
+        if (!role) {
+          await replyEphemeral(interaction, `O cargo ${roleId} não existe neste servidor.`);
+          return true;
+        }
+      }
+
+      updateGuildSettings(db, interaction.guildId, { missionAllowedRoleIds: roleIds });
+      audit(interaction, db, 'config.missions.mentions.updated', { roleIds });
+      await replyEphemeral(interaction, roleIds.length
+        ? `Menções permitidas atualizadas para ${roleIds.length} cargo(s).`
+        : 'Menções de cargos removidas.');
       return true;
     }
 
@@ -1008,8 +1128,8 @@ export function createAiConfigModal(ai = {}) {
     .setTitle('Configurar inteligência artificial')
     .addComponents(
       modalInput('model', 'Modelo NVIDIA', {
-        value: ai.model || 'z-ai/glm-5.3',
-        placeholder: 'z-ai/glm-5.3 ou z-ai/glm-5.3-flash',
+        value: DEFAULT_NVIDIA_MODEL,
+        placeholder: DEFAULT_NVIDIA_MODEL,
       }),
       modalInput('personality', 'Personalidade em português', {
         value: ai.personality || 'Tecnológica, profissional, natural, prestativa e objetiva.',

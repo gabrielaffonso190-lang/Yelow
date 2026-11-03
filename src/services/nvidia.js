@@ -1,5 +1,6 @@
 const modelsEndpoint = 'https://integrate.api.nvidia.com/v1/models';
-const knownModels = new Set(['z-ai/glm-5.3', 'z-ai/glm-5.3-flash']);
+export const DEFAULT_NVIDIA_MODEL = 'openai/gpt-oss-20b';
+const knownModels = new Set([DEFAULT_NVIDIA_MODEL]);
 const cacheDurationMs = 60_000;
 
 let cachedModels;
@@ -61,21 +62,16 @@ export async function getAvailableNvidiaModels({
 }
 
 export async function resolveAvailableNvidiaModel(preferredModel, apiKey, options) {
-  if (!knownModels.has(preferredModel)) {
-    throw new NvidiaServiceError('O modelo configurado para a IA não é permitido.');
-  }
-
   const availableModels = await getAvailableNvidiaModels({ ...options, apiKey });
-  if (availableModels.includes(preferredModel)) {
+  if (knownModels.has(preferredModel) && availableModels.includes(preferredModel)) {
     return preferredModel;
   }
-
-  if (availableModels.includes('z-ai/glm-5.3-flash')) {
-    return 'z-ai/glm-5.3-flash';
+  if (availableModels.includes(DEFAULT_NVIDIA_MODEL)) {
+    return DEFAULT_NVIDIA_MODEL;
   }
 
   throw new NvidiaServiceError(
-    'Nenhum dos modelos GLM compatíveis está disponível para esta conta NVIDIA.',
+    `O modelo ${DEFAULT_NVIDIA_MODEL} não está disponível para esta conta NVIDIA.`,
   );
 }
 

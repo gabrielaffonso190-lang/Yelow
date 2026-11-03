@@ -9,13 +9,17 @@ import {
 import { listProducts } from './commerce.js';
 import { isGuildAdmin, isGuildStaff } from './permissions.js';
 import { createSupportTicket } from './customization.js';
-import { resolveAvailableNvidiaModel } from './nvidia.js';
+import {
+  DEFAULT_NVIDIA_MODEL,
+  resolveAvailableNvidiaModel,
+} from './nvidia.js';
+import { requestHuehueCompletion } from './huehue.js';
 
 const endpoint = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const maximumHistoryMessages = 12;
 const maximumMessageLength = 4000;
 const maximumReplyLength = 1800;
-const requestTimeoutMs = 25_000;
+const requestTimeoutMs = 20_000;
 const rateLimitWindowMs = 60_000;
 const rateLimitMaximum = 4;
 const rateLimits = new Map();
@@ -301,8 +305,44 @@ async function executeTool(name, rawArgs, context) {
   }
 }
 
-async function requestCompletion(apiKey, model, messages, signal, toolChoice = 'auto') {
-  const response = await fetch(endpoint, {
+function buildHuehuePrompt(messages) {
+  const [systemMessage, ...history] = messages;
+  const instructions = typeof systemMessage?.content === 'string'
+    ? systemMessage.content.slice(0, 2000)
+    : 'Responda em português brasileiro, com clareza e segurança.';
+  const prefix = [
+    instructions,
+    'Neste provedor, as ferramentas da VANTA não estão disponíveis. Não afirme que consultou pedidos, catálogo, pagamentos ou configurações, nem execute ações; oriente a pessoa a usar os comandos do bot.',
+    '',
+    'Histórico recente:',
+    '',
+  ].join('\n');
+  let remaining = 12_000 - prefix.length;
+  const recent = [];
+  for (const message of history.toReversed()) {
+    const speaker = message.role === 'assistant' ? 'VANTA' : 'Usuário';
+    const line = `${speaker}: ${message.content}`;
+    if (line.length > remaining) {
+      if (!recent.length && remaining > speaker.length + 2) {
+        recent.push(`${speaker}: ${line.slice(-(remaining - speaker.length - 2))}`);
+      }
+      break;
+    }
+    recent.push(line);
+    remaining -= line.length + 2;
+  }
+  return `${prefix}${recent.toReversed().join('\n\n')}`;
+}
+
+async function requestCompletion(
+  apiKey,
+  model,
+  messages,
+  signal,
+  toolChoice = 'auto',
+  fetchImpl = fetch,
+) {
+  const response = await fetchImpl(endpoint, {
     method: 'POST',
     signal,
     headers: {
@@ -314,6 +354,8 @@ async function requestCompletion(apiKey, model, messages, signal, toolChoice = '
       messages,
       temperature: 0.4,
       max_tokens: 700,
+      stream: false,
+      reasoning_effort: 'low',
       tools: toolDefinitions,
       tool_choice: toolChoice,
     }),
@@ -364,6 +406,7 @@ export async function respondToMessage({
   user,
   member,
   content,
+  fetchImpl = fetch,
 }) {
   const { settings } = getGuildSettings(db, guild.id);
 
@@ -372,25 +415,21 @@ export async function respondToMessage({
   }
 
   const apiKey = process.env.NVIDIA_API_KEY?.trim();
-  if (!apiKey) {
-    return { content: 'A IA está indisponível: falta configurar NVIDIA_API_KEY.' };
-  }
-
-  consumeRateLimit(user.id);
-  const preferredModel = settings.ai?.model || 'z-ai/glm-5.3';
-  let model;
-  try {
-    model = await resolveAvailableNvidiaModel(preferredModel, apiKey);
-  } catch (error) {
-    throw new AiServiceError(error instanceof Error
-      ? error.message
-      : 'Não foi possível verificar os modelos NVIDIA disponíveis.');
-  }
+  const huehueApiKey = process.env.HUEHUE_API_KEY?.trim();
+  const preferredModel = settings.ai?.model === DEFAULT_NVIDIA_MODEL
+    ? settings.ai.model
+    : DEFAULT_NVIDIA_MODEL;
 
   const userText = content.trim().slice(0, maximumMessageLength);
   if (!userText) {
     return { content: 'Mencione a VANTA com uma pergunta para iniciar a conversa.' };
   }
+  if (!apiKey && !huehueApiKey) {
+    return {
+      content: 'A IA está indisponível: configure NVIDIA_API_KEY ou HUEHUE_API_KEY.',
+    };
+  }
+  consumeRateLimit(user.id);
 
   const history = getHistory(db, guild.id, channelId, user.id);
   const messages = [
@@ -398,82 +437,124 @@ export async function respondToMessage({
     ...history,
     { role: 'user', content: userText },
   ];
+  const conversationMessages = [...messages];
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
-  let finalMessage;
+  let reply;
+  let providerLabel;
   let draftId = null;
   let supportChannelId = null;
 
   try {
-    finalMessage = await requestCompletion(
-      apiKey,
-      model,
-      messages,
-      controller.signal,
-    );
+    let nvidiaError;
+    if (apiKey) {
+      try {
+        const model = await resolveAvailableNvidiaModel(preferredModel, apiKey, { fetchImpl });
+        let finalMessage = await requestCompletion(
+          apiKey,
+          model,
+          messages,
+          controller.signal,
+          'auto',
+          fetchImpl,
+        );
 
-    if (finalMessage.tool_calls?.length) {
-      messages.push({
-        role: 'assistant',
-        content: finalMessage.content || '',
-        tool_calls: finalMessage.tool_calls.slice(0, 3),
-      });
-
-      for (const call of finalMessage.tool_calls.slice(0, 3)) {
-        let result;
-
-        try {
-          result = await executeTool(call.function?.name, call.function?.arguments, {
-            db,
-            guildId: guild.id,
-            channelId,
-            userId: user.id,
-            guild,
-            user,
-            member,
+        if (finalMessage.tool_calls?.length) {
+          messages.push({
+            role: 'assistant',
+            content: finalMessage.content || '',
+            tool_calls: finalMessage.tool_calls.slice(0, 3),
           });
-          draftId ||= result?.draftId;
-          supportChannelId ||= result?.channelId;
-        } catch (error) {
-          result = {
-            error: error instanceof AiServiceError
-              ? error.message
-              : 'Não foi possível concluir a ferramenta solicitada.',
-          };
+
+          for (const call of finalMessage.tool_calls.slice(0, 3)) {
+            let result;
+
+            try {
+              result = await executeTool(call.function?.name, call.function?.arguments, {
+                db,
+                guildId: guild.id,
+                channelId,
+                userId: user.id,
+                guild,
+                user,
+                member,
+              });
+              draftId ||= result?.draftId;
+              supportChannelId ||= result?.channelId;
+            } catch (error) {
+              result = {
+                error: error instanceof AiServiceError
+                  ? error.message
+                  : 'Não foi possível concluir a ferramenta solicitada.',
+              };
+            }
+
+            messages.push({
+              role: 'tool',
+              tool_call_id: call.id,
+              content: JSON.stringify(result),
+            });
+          }
+
+          finalMessage = await requestCompletion(
+            apiKey,
+            model,
+            messages,
+            controller.signal,
+            'none',
+            fetchImpl,
+          );
         }
 
-        messages.push({
-          role: 'tool',
-          tool_call_id: call.id,
-          content: JSON.stringify(result),
-        });
+        reply = (typeof finalMessage.content === 'string' && finalMessage.content.trim())
+          ? finalMessage.content.trim().slice(0, maximumReplyLength)
+          : 'Não consegui preparar uma resposta agora. Tente reformular sua pergunta.';
+        providerLabel = model;
+      } catch (error) {
+        nvidiaError = error?.name === 'AbortError'
+          ? 'A IA NVIDIA demorou demais para responder.'
+          : error instanceof AiServiceError
+            ? error.message
+            : 'Não foi possível obter uma resposta da IA NVIDIA.';
+      }
+    } else {
+      nvidiaError = 'NVIDIA_API_KEY não está configurada.';
+    }
+
+    if (!reply) {
+      if (!huehueApiKey) {
+        throw new AiServiceError(
+          `${nvidiaError} Configure HUEHUE_API_KEY para habilitar o provedor alternativo.`,
+        );
       }
 
-      finalMessage = await requestCompletion(
-        apiKey,
-        model,
-        messages,
-        controller.signal,
-        'none',
-      );
+      try {
+        reply = await requestHuehueCompletion({
+          apiKey: huehueApiKey,
+          message: buildHuehuePrompt(conversationMessages),
+          fetchImpl,
+        });
+        providerLabel = 'Huehue GPT-5 mini';
+      } catch (error) {
+        const fallbackError = error instanceof Error
+          ? error.message
+          : 'falha desconhecida';
+        throw new AiServiceError(
+          `${nvidiaError} O fallback do Huehue também falhou: ${fallbackError}`,
+        );
+      }
     }
   } catch (error) {
-    if (error?.name === 'AbortError') {
-      throw new AiServiceError('A IA demorou demais para responder. Tente novamente.');
-    }
-
     if (error instanceof AiServiceError) {
       throw error;
     }
 
-    throw new AiServiceError('Não foi possível obter uma resposta da IA.');
+    throw new AiServiceError('Não foi possível obter uma resposta dos provedores de IA.');
   } finally {
     clearTimeout(timeout);
   }
 
-  const reply = (typeof finalMessage.content === 'string' && finalMessage.content.trim())
-    ? finalMessage.content.trim().slice(0, maximumReplyLength)
-    : 'Não consegui preparar uma resposta agora. Tente reformular sua pergunta.';
   messages.push({ role: 'assistant', content: reply });
   saveHistory(db, guild.id, channelId, user.id, messages.filter((message) => (
     (message.role === 'user' || message.role === 'assistant')
@@ -489,7 +570,9 @@ export async function respondToMessage({
     : '';
 
   return {
-    content: `${model !== preferredModel ? `_(Modelo disponível nesta conta: ${model}.)_\n` : ''}${reply}${extra}${draftNotice}`
+    content: `${providerLabel === DEFAULT_NVIDIA_MODEL
+      ? ''
+      : `_(Resposta via ${providerLabel}.)_\n`}${reply}${extra}${draftNotice}`
       .slice(0, maximumReplyLength),
     components: draftId ? responseComponents(draftId) : [],
   };

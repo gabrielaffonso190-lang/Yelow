@@ -4,13 +4,16 @@ import { DatabaseSync } from 'node:sqlite';
 import { ChannelType } from 'discord.js';
 import { ensureMissionSchema } from '../src/services/db.js';
 import {
+  buildMissionAnnouncementPreview,
   configureMissionAlerts,
   createMission,
   listMissions,
   MissionError,
   publishMission,
+  renderVantaQuestImage,
   runMissionMaintenance,
   setMissionStatus,
+  syncMissionAnnouncementStatus,
   updateMission,
 } from '../src/services/missions.js';
 
@@ -95,6 +98,35 @@ test('missions reject unverified, unsafe, incomplete, and expired quest data', (
   db.close();
 });
 
+test('missions persist source and image identity and reject duplicate campaign records', () => {
+  const db = createDatabase();
+  const quest = createMission(db, 'guild-1', 'admin-1', missionInput({
+    bannerUrl: 'https://cdn.discordapp.com/quest-banner.png',
+    imageSourceUrl: 'https://discord.com/blog/example',
+  }));
+  assert.equal(quest.source_name, 'Discord Blog');
+  assert.equal(quest.image_source, 'Fonte oficial da imagem informada');
+  assert.equal(quest.image_source_url, 'https://discord.com/blog/example');
+  assert.match(quest.image_identifier, /^[a-f0-9]{64}$/);
+  assert.throws(() => createMission(db, 'guild-1', 'admin-1', missionInput({
+    bannerUrl: 'https://cdn.discordapp.com/quest-banner.png',
+    imageSourceUrl: 'https://discord.com/blog/example',
+  })), MissionError);
+  db.close();
+});
+
+test('VANTA generates a safe PNG fallback and a non-publishing card preview', async () => {
+  const image = await renderVantaQuestImage({
+    name: '<Quest "premium">',
+    promoted_content: 'Example Game & more',
+  });
+  assert.equal(image.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  const preview = await buildMissionAnnouncementPreview();
+  assert.equal(preview.embeds[0].toJSON().image.url, 'attachment://vanta-mission-preview.png');
+  assert.equal(preview.files.length, 1);
+  assert.equal(preview.components[0].toJSON().components[0].disabled, true);
+});
+
 test('mission announcements include verified details, banner, and the Discord button', async () => {
   const db = createDatabase();
   const quest = createMission(db, 'guild-1', 'admin-1', missionInput({
@@ -127,6 +159,7 @@ test('mission announcements include verified details, banner, and the Discord bu
     actorId: 'admin-1',
     questId: quest.id,
     channel,
+    validateImage: async () => ({ sizeBytes: 1024, mimeType: 'image/png' }),
   });
   assert.equal(result.updated, false);
   assert.equal(sent.length, 1);
@@ -143,6 +176,7 @@ test('mission announcements include verified details, banner, and the Discord bu
     actorId: 'admin-1',
     questId: quest.id,
     channel,
+    validateImage: async () => ({ sizeBytes: 1024, mimeType: 'image/png' }),
   });
   assert.equal(sent.length, 1);
   assert.equal(edits.length, 1);
@@ -182,5 +216,34 @@ test('mission maintenance expires quests and sends one configured close reminder
   assert.match(sent[0].embeds[0].toJSON().title, /perto do encerramento/);
   await runMissionMaintenance({ client, db, now });
   assert.equal(sent.length, 1);
+  db.close();
+});
+
+test('ending a quest updates the existing public announcement and removes its button', async () => {
+  const db = createDatabase();
+  const quest = createMission(db, 'guild-1', 'admin-1', missionInput());
+  const edits = [];
+  const message = {
+    embeds: [{
+      data: { title: `🎯 ${quest.name}` },
+      toJSON: () => ({ title: `🎯 ${quest.name}`, description: 'Quest' }),
+    }],
+    edit: async (payload) => edits.push(payload),
+  };
+  const channel = {
+    messages: { fetch: async () => message },
+  };
+  const client = {
+    channels: { fetch: async () => channel },
+  };
+  db.prepare(`
+    UPDATE missions SET announcement_channel_id = ?, announced_message_id = ?
+    WHERE id = ?
+  `).run('announcements-1', 'announcement-message-1', quest.id);
+  const ended = setMissionStatus(db, 'guild-1', 'admin-1', quest.id, 'ended');
+
+  assert.equal(await syncMissionAnnouncementStatus({ client, quest: ended }), true);
+  assert.match(edits[0].embeds[0].data.title, /ENCERRADA/);
+  assert.deepEqual(edits[0].components, []);
   db.close();
 });
