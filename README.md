@@ -78,6 +78,18 @@ emojis da aplicação, não chaves; os 29 IDs foram confirmados com o Discord.
 O bot usa esses IDs por padrão, aceita substituições por ID ou nome e não exige
 copiá-los para `.env`.
 
+## Diagnóstico de inicialização na Discloud
+
+Use Node.js 22.9 ou superior, conforme `engines` no `package.json`; o bot usa
+`node:sqlite`. Falhas ao carregar a configuração, importar módulos ou conectar
+ao Discord registram nome, mensagem e stack trace. Valores de variáveis de
+ambiente com nomes de token, chave, segredo ou senha são redigidos do log.
+Se aparecer `Missing required environment variable: DISCORD_TOKEN`, configure
+esse Secret no painel da Discloud e reinicie o bot, sem colar o valor nos logs.
+Se o processo for encerrado sem uma falha JavaScript registrada, consulte o
+histórico de memória/encerramento da plataforma: um limite de RAM pode encerrar
+o processo antes que o Node consiga registrar um stack trace.
+
 ## Execução
 
 ```sh

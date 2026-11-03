@@ -12,6 +12,7 @@ import { createPaymentProviders } from './services/paymentProviders.js';
 import { startPaymentWebhookServer } from './services/payments.js';
 import { startMissionMaintenance } from './services/missions.js';
 import { startMissionDiscovery } from './services/missionDiscovery.js';
+import { logError } from './utils/errorLogging.js';
 
 async function main() {
   const { token } = getDiscordConfig();
@@ -35,7 +36,7 @@ async function main() {
   registerInteractionCreateEvent(client, commandMap, services);
   registerMessageCreateEvent(client, services, commandMap);
   client.on(Events.Error, (error) => {
-    console.error(`Erro no cliente Discord (${error.name}).`);
+    logError('Erro no cliente Discord.', error);
   });
 
   client.once(Events.ClientReady, () => {
@@ -71,7 +72,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  const errorName = error instanceof Error ? error.name : 'UnknownError';
-  console.error(`Não foi possível iniciar a VANTA (${errorName}).`);
+  logError('Não foi possível iniciar a VANTA.', error);
   process.exitCode = 1;
 });
