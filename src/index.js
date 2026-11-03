@@ -1,5 +1,5 @@
 import { Client, Events, GatewayIntentBits } from 'discord.js';
-import { commands } from './commands/index.js';
+import { createCommandMap } from './commands/index.js';
 import { getDiscordConfig } from './config/env.js';
 import { registerInteractionCreateEvent } from './events/interactionCreate.js';
 import { registerMessageCreateEvent } from './events/messageCreate.js';
@@ -28,7 +28,7 @@ async function main() {
       GatewayIntentBits.MessageContent,
     ],
   });
-  const commandMap = new Map(commands.map((command) => [command.data.name, command]));
+  const commandMap = createCommandMap();
   const paymentConfiguration = createPaymentProviders();
   const services = {
     db,

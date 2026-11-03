@@ -25,3 +25,25 @@ export const commands = [
   orderCommand,
   stockCommand,
 ];
+
+export function getSlashCommandPayload(commandList = commands) {
+  const names = new Set();
+  const payload = commandList.map((command) => {
+    const data = command.data?.toJSON?.();
+    const name = data?.name;
+    if (typeof name !== 'string' || !name.trim()) {
+      throw new Error('Every slash command must define a valid name.');
+    }
+    if (names.has(name)) {
+      throw new Error(`Duplicate slash command name: ${name}`);
+    }
+    names.add(name);
+    return data;
+  });
+  return payload;
+}
+
+export function createCommandMap(commandList = commands) {
+  getSlashCommandPayload(commandList);
+  return new Map(commandList.map((command) => [command.data.name, command]));
+}

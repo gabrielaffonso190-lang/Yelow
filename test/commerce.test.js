@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { ChannelType, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
-import { commands } from '../src/commands/index.js';
+import {
+  commands,
+  createCommandMap,
+  getSlashCommandPayload,
+} from '../src/commands/index.js';
 import { getBannerUrl, getCategoryBannerKey, OFFICIAL_BANNERS } from '../src/config/banners.js';
 import {
   ensureCartNumberSchema,
@@ -612,6 +616,13 @@ test('slash command registry contains no duplicate names', () => {
     'pedido',
     'estoque',
   ]);
+  const payload = getSlashCommandPayload();
+  assert.equal(payload.length, names.length);
+  assert.equal(new Set(payload.map(({ name }) => name)).size, payload.length);
+  assert.throws(() => getSlashCommandPayload([commands[0], commands[0]]), /Duplicate slash command name/);
+  assert.throws(() => createCommandMap([commands[0], commands[0]]), /Duplicate slash command name/);
+  assert.deepEqual(payload.find(({ name }) => name === 'gerar').options.map(({ name }) => name), ['pix']);
+  assert.deepEqual(payload.find(({ name }) => name === 'estoque').options.map(({ name }) => name), ['consultar', 'ajustar']);
   const config = commands.find(({ data }) => data.name === 'config').data.toJSON();
   assert.equal(config.options[0].name, 'center');
 });

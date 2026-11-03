@@ -1,5 +1,5 @@
 import { REST, Routes } from 'discord.js';
-import { commands } from './commands/index.js';
+import { getSlashCommandPayload } from './commands/index.js';
 import { getDeployConfig } from './config/env.js';
 import { loadLocalDiscordToken } from './config/loadLocalEnv.js';
 
@@ -11,7 +11,7 @@ async function main() {
   const route = guildId
     ? Routes.applicationGuildCommands(clientId, guildId)
     : Routes.applicationCommands(clientId);
-  const body = commands.map((command) => command.data.toJSON());
+  const body = getSlashCommandPayload();
 
   await rest.put(route, { body });
   console.log(`Comandos da VANTA registrados (${guildId ? 'servidor' : 'global'}).`);
