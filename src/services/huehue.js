@@ -5,9 +5,10 @@ const maximumResponseLength = 12_000;
 const maximumResponseBodyBytes = 64 * 1024;
 
 export class HuehueServiceError extends Error {
-  constructor(message) {
+  constructor(message, { retryable = false } = {}) {
     super(message);
     this.name = 'HuehueServiceError';
+    this.retryable = retryable;
   }
 }
 
@@ -89,11 +90,15 @@ export async function requestHuehueCompletion({
     const reason = error?.name === 'TimeoutError'
       ? 'tempo limite excedido'
       : 'falha de conexão';
-    throw new HuehueServiceError(`Não foi possível consultar a IA do Huehue: ${reason}.`);
+    throw new HuehueServiceError(`Não foi possível consultar a IA do Huehue: ${reason}.`, {
+      retryable: error?.name !== 'TimeoutError',
+    });
   }
 
   if (!response.ok) {
-    throw new HuehueServiceError(`A IA do Huehue recusou a solicitação (HTTP ${response.status}).`);
+    throw new HuehueServiceError(`A IA do Huehue recusou a solicitação (HTTP ${response.status}).`, {
+      retryable: response.status === 429 || response.status >= 500,
+    });
   }
 
   let responseText;

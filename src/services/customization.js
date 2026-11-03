@@ -10,9 +10,12 @@ import {
   ChannelType,
   EmbedBuilder,
   PermissionFlagsBits,
+  StringSelectMenuBuilder,
 } from 'discord.js';
 import { getGuildSettings, withTransaction, writeAuditLog } from './db.js';
 import { BRAND, withBrandSignature } from '../config/brand.js';
+import { getBannerUrl } from '../config/banners.js';
+import { emojiComponent } from '../config/emojis.js';
 import { getOperationalRoleIds, isGuildStaff } from './permissions.js';
 
 const sessionDurationMs = 15 * 60 * 1000;
@@ -550,6 +553,146 @@ export function buildSupportPanel(db, guildId) {
         .setStyle(ButtonStyle.Primary),
     )],
   };
+}
+
+export const CONTRIBUTION_OPTIONS = Object.freeze([
+  { value: 'money', label: 'Dinheiro', emoji: 'money' },
+  { value: 'card', label: 'Cartão', emoji: 'creditCard' },
+  { value: 'dreams', label: 'Sonhos', emoji: 'currency' },
+  { value: 'gift', label: 'Presente', emoji: 'gift' },
+  { value: 'partnership', label: 'Parceria', emoji: 'partnership' },
+]);
+
+export function buildContributorPanel(db, guildId) {
+  const { settings } = getGuildSettings(db, guildId);
+  const config = settings.contributorPanel ?? {};
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('contributor:category')
+    .setPlaceholder('Selecione uma opção')
+    .addOptions(CONTRIBUTION_OPTIONS.map((option) => ({
+      label: option.label,
+      value: option.value,
+      ...(emojiComponent(option.emoji) ? { emoji: emojiComponent(option.emoji) } : {}),
+    })));
+  const embed = withBrandSignature(new EmbedBuilder()
+    .setColor(BRAND.colors.white)
+    .setTitle(config.title || 'CONTRIBUIDOR & PARCERIAS')
+    .setDescription(config.description || 'Escolha uma opção para falar com a equipe VANTA.')
+    .setImage(getBannerUrl(db, guildId, 'contributor')));
+  return {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(select)],
+    allowedMentions: { parse: [] },
+  };
+}
+
+export async function createContributionTicket({ db, guild, user, botUserId, category }) {
+  const option = CONTRIBUTION_OPTIONS.find((entry) => entry.value === category);
+  if (!option) throw new CustomizationError('Opção de contribuição inválida.');
+  const existing = db.prepare(`
+    SELECT * FROM contribution_requests
+    WHERE guild_id = ? AND user_id = ? AND category = ?
+      AND status IN ('creating', 'open', 'in_service')
+    LIMIT 1
+  `).get(guild.id, user.id, category);
+  if (existing?.status === 'creating') {
+    throw new CustomizationError('Sua solicitação está sendo criada. Tente novamente em instantes.');
+  }
+  if (existing?.channel_id) {
+    const channel = await guild.channels.fetch(existing.channel_id).catch((error) => {
+      if (error?.code === 10003) return null;
+      throw error;
+    });
+    if (channel) return { channel, requestId: existing.id, duplicate: true };
+    db.prepare(`
+      UPDATE contribution_requests SET status = 'closed', closed_at = ?, result = ?
+      WHERE id = ? AND status IN ('open', 'in_service')
+    `).run(new Date().toISOString(), 'Canal não encontrado ao recuperar solicitação.', existing.id);
+  }
+
+  const id = randomUUID();
+  const openedAt = new Date().toISOString();
+  withTransaction(db, () => {
+    db.prepare(`
+      INSERT INTO contribution_requests
+        (id, guild_id, user_id, category, status, opened_at)
+      VALUES (?, ?, ?, ?, 'creating', ?)
+    `).run(id, guild.id, user.id, category, openedAt);
+    writeAuditLog(db, guild.id, user.id, 'contribution.opening', {
+      requestId: id,
+      category,
+      openedAt,
+    });
+  });
+
+  const { settings } = getGuildSettings(db, guild.id);
+  const panel = settings.contributorPanel ?? {};
+  const staffRoleIds = getAllowedStaffRoles(db, guild.id, guild);
+  let channel;
+  try {
+    channel = await guild.channels.create({
+      name: `contrib-${category}-${id.slice(0, 6)}`,
+      type: ChannelType.GuildText,
+      ...(settings.ticketCategoryId ? { parent: settings.ticketCategoryId } : {}),
+      permissionOverwrites: permissionOverwrites(guild, user.id, botUserId, staffRoleIds),
+      reason: `Solicitação ${option.label} por ${user.id}`,
+    });
+    db.prepare(`
+      UPDATE contribution_requests SET channel_id = ?, status = 'open' WHERE id = ?
+    `).run(channel.id, id);
+    writeAuditLog(db, guild.id, user.id, 'contribution.opened', {
+      requestId: id,
+      category,
+      channelId: channel.id,
+      openedAt,
+    });
+    const embed = withBrandSignature(new EmbedBuilder()
+      .setColor(BRAND.colors.white)
+      .setTitle(`Solicitação · ${option.label}`)
+      .setDescription([
+        `Usuário: <@${user.id}>`,
+        `Categoria: **${option.label}**`,
+        `Solicitação: \`${id}\``,
+        `Aberta em: <t:${Math.floor(Date.parse(openedAt) / 1000)}:F>`,
+        'Status: aberta',
+      ].join('\n'))
+      .setImage(getBannerUrl(db, guild.id, 'cart')));
+    await channel.send({
+      content: [
+        `<@${user.id}> ${panel.welcomeMessage || 'Sua solicitação foi criada. A equipe VANTA responderá por este canal.'}`,
+        staffRoleIds.map((roleId) => `<@&${roleId}>`).join(' '),
+      ].filter(Boolean).join('\n'),
+      embeds: [embed],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`contribution:claim:${id}`)
+          .setLabel('Assumir atendimento')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(`contribution:transfer:${id}`)
+          .setLabel('Transferir')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`contribution:close:${id}`)
+          .setLabel('Encerrar solicitação')
+          .setStyle(ButtonStyle.Danger),
+      )],
+      allowedMentions: { users: [user.id], roles: staffRoleIds },
+    });
+    return { channel, requestId: id, duplicate: false };
+  } catch (error) {
+    if (channel) await channel.delete('Falha ao criar solicitação de contribuição').catch(() => {});
+    db.prepare(`
+      UPDATE contribution_requests SET status = 'closed', channel_id = NULL,
+        closed_at = ?, result = ? WHERE id = ?
+    `).run(new Date().toISOString(), 'Falha ao abrir canal.', id);
+    writeAuditLog(db, guild.id, user.id, 'contribution.creation_failed', {
+      requestId: id,
+      category,
+      error: String(error?.code || error?.name || 'UNKNOWN').slice(0, 80),
+    });
+    throw error;
+  }
 }
 
 export async function createSupportTicket({ db, guild, user, botUserId }) {

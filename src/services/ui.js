@@ -16,6 +16,7 @@ import {
 import { existsSync, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { BRAND, withBrandSignature } from '../config/brand.js';
+import { getBannerUrl, getCategoryBannerKey } from '../config/banners.js';
 import { emojiComponent } from '../config/emojis.js';
 import { getProductImagePath } from '../config/productImages.js';
 import { getCartTotals, formatMoney, listProducts } from './commerce.js';
@@ -279,6 +280,10 @@ function sectionComponents(section, db, guildId) {
       .setCustomId('cfg:channel:ticketPanelChannelId')
       .setPlaceholder('Canal do painel de atendimento')
       .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)));
+    rows.push(row(new ChannelSelectMenuBuilder()
+      .setCustomId('cfg:channel:contributorPanelChannelId')
+      .setPlaceholder('Canal público de Contribuidor & Parcerias')
+      .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)));
     rows.push(row(new UserSelectMenuBuilder()
       .setCustomId('cfg:user:founderUserId')
       .setPlaceholder('Founder para solicitações de GamePass')
@@ -288,6 +293,10 @@ function sectionComponents(section, db, guildId) {
       .setCustomId('cfg:publish:tickets')
       .setLabel('Publicar painel de tickets')
       .setStyle(ButtonStyle.Success)));
+    rows.push(row(new ButtonBuilder()
+      .setCustomId('cfg:publish:contributor')
+      .setLabel('Publicar Contribuidor & Parcerias')
+      .setStyle(ButtonStyle.Primary)));
   } else if (section === 'customization') {
     rows.push(row(new ChannelSelectMenuBuilder()
       .setCustomId('cfg:channel:customizationCategoryId')
@@ -392,6 +401,8 @@ export function buildShopView(db, guildId, category = null, page = 0) {
       }).join('\n\n').slice(0, 1024) || 'Nenhum produto nesta categoria.',
     })
     .setFooter({ text: `Página ${currentPage + 1} de ${pageCount} · ${BRAND.signature}` });
+  const bannerKey = getCategoryBannerKey(selectedCategory);
+  if (bannerKey) embed.setImage(getBannerUrl(db, guildId, bannerKey));
 
   const categorySelect = new StringSelectMenuBuilder()
     .setCustomId('shop:category')
@@ -532,6 +543,7 @@ export function buildCartView(db, guildId, userId) {
       { name: 'Total', value: formatMoney(cart.totalCents), inline: true },
       { name: 'Cupom', value: cart.couponCode || 'Nenhum', inline: true },
     );
+  embed.setImage(getBannerUrl(db, guildId, 'cart'));
   const rows = [];
 
   if (cart.items.length) {
@@ -561,12 +573,13 @@ export function buildCartView(db, guildId, userId) {
 
 function categoryEmojiPurpose(category) {
   const normalized = category.toLowerCase();
-  if (normalized.includes('spotify')) return 'spotify';
-  if (normalized.includes('youtube')) return 'youtube';
+  if (normalized.includes('contas spotify')) return 'spotifyAccounts';
+  if (normalized.includes('spotify')) return 'spotifyPremium';
+  if (normalized.includes('youtube')) return 'youtubePremium';
   if (normalized.includes('robux')) return 'robux';
-  if (normalized.includes('nitro')) return 'nitro';
+  if (normalized.includes('nitro')) return 'discordNitro';
   if (normalized.includes('discord')) return 'discordAccounts';
-  if (normalized.includes('impulso')) return 'boosts';
+  if (normalized.includes('impulso')) return 'discordBoosts';
   if (normalized.includes('gamepass')) return 'gamepass';
   return 'product';
 }

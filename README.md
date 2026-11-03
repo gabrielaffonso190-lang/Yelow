@@ -5,7 +5,8 @@ Bot modular para Discord, em Node.js 22.9+ com discord.js v14 e ES Modules.
 ## Funcionalidades
 
 - `/ping`, `/healty`, `/config center`, `/comprar`, `/carrinho`,
-  `/personalizar`, `/conversa limpar` e `/missoes`.
+  `/personalizar`, `/conversa limpar`, `/missoes`, `/pedido`, `/estoque` e
+  `/gerar pix`.
 - Configuração por servidor, catálogo editável, estoque, carrinhos, cupons,
   pedidos e tickets privados persistidos no SQLite existente.
 - Painel MATRIX persistente no canal configurado (por padrão,
@@ -31,8 +32,8 @@ Bot modular para Discord, em Node.js 22.9+ com discord.js v14 e ES Modules.
   alertas e métricas MATRIX. Discord Discover e Newsroom continuam manuais.
 
 Pix pelas APIs documentadas da Z.PAY e da VoxPay está integrado ao fluxo
-existente de pedidos. Z.PAY é o provedor principal por padrão e VoxPay é o
-alternativo; custos de fornecedor não encontrados permanecem pendentes, e
+existente de pedidos. Z.PAY é o provedor principal por padrão e VoxPay é a
+alternativa; custos de fornecedor não encontrados permanecem pendentes, e
 Robux/GamePass são encaminhados à equipe para confirmação.
 
 ## Requisitos
@@ -46,10 +47,18 @@ Robux/GamePass são encaminhados à equipe para confirmação.
   bancos existentes recebem somente migrações aditivas. O caminho pode ser
   substituído com `DATABASE_PATH`.
 - `NVIDIA_API_KEY` para a IA principal. `HUEHUE_API_KEY` habilita o fallback
-  GPT-5 mini pelo endpoint oficial informado do Huehue.
-- `ZPAY_CLIENT_ID` e `ZPAY_CLIENT_SECRET` para criar cobranças Pix.
+  GPT-5 mini pelo endpoint oficial informado do Huehue. Configure ambos na
+  Discloud para redundância; apenas a NVIDIA basta para respostas principais.
+- Timeouts, retries e tamanho do histórico usam `AI_REQUEST_TIMEOUT_MS`,
+  `AI_FALLBACK_TIMEOUT_MS`, `AI_RETRY_ATTEMPTS` e `AI_HISTORY_MESSAGES`.
+  Padrões: 18 s, 14 s, uma repetição transitória e 24 mensagens recentes.
+  `AI_RATE_LIMIT_PER_MINUTE` limita mensagens por usuário e tem padrão 4.
+- `ZPAY_CLIENT_ID` e `ZPAY_CLIENT_SECRET` para criar cobranças Pix por padrão.
 - `ZPAY_ENVIRONMENT` pode ser `production` (padrão) ou `sandbox`.
-- `VOXPAY_API_KEY` para habilitar VoxPay como provedor alternativo.
+- `VOXPAY_API_KEY` é opcional para usar VoxPay como alternativa. `VOXPAY_API_URL`
+  usa `https://voxpaybr.com/api/v1` por padrão.
+- `VANTA_FEEDBACK_CHANNEL_ID` seleciona o fallback para avaliações quando as
+  DMs estiverem fechadas; `VANTA_FEEDBACK_IMAGE_URL` é opcional.
 
 ## Configuração
 
@@ -70,13 +79,14 @@ necessárias para criar canais privados, gerenciar canais e enviar mensagens.
 Habilite **Message Content Intent** para a IA por menção e comandos por prefixo.
 Configure permissões de DM para receber respostas privadas aos comandos de
 prefixo.
-Configure `HUEHUE_API_KEY` nos Secrets para o fallback da IA; nunca coloque a
-chave no código ou em mensagens. Um HTTP 401 do Huehue significa que a chave ou
-o acesso à API precisa ser corrigido no painel do provedor.
-`.env.example` inclui IDs das application emojis VANTA. São IDs públicos dos
-emojis da aplicação, não chaves; os 29 IDs foram confirmados com o Discord.
-O bot usa esses IDs por padrão, aceita substituições por ID ou nome e não exige
-copiá-los para `.env`.
+Configure `NVIDIA_API_KEY` e `HUEHUE_API_KEY` nos Secrets da Discloud para ter
+provedor principal e fallback; nunca coloque as chaves em código ou mensagens.
+Um HTTP 401 do Huehue significa que a chave ou o acesso à API precisa ser
+corrigido no painel do provedor. Os limites de timeout/history podem ser
+ajustados pelas variáveis `AI_*` documentadas no `.env.example`.
+`.env.example` lista IDs e aliases de emojis VANTA, além dos canais opcionais
+de feedback. Emojis indisponíveis para o bot são registrados e substituídos por
+fallback Unicode; os painéis continuam utilizáveis.
 
 ## Diagnóstico de inicialização na Discloud
 
@@ -107,10 +117,10 @@ Comandos de prefixo suportados: `!vanta ajuda`, `!vanta ping`, `!vanta healty`,
 `!vanta conversa limpar`, `!vanta missoes listar`, `!vanta missoes fontes`,
 `!vanta missoes descobrir`, `!vanta missoes teste`, `!vanta comprar`,
 `!vanta personalizar` e `/anuncio` como `!vanta anuncio preparar`.
-`!yelow` é um alias. Os comandos `/config center` e `/carrinho` continuam
-exclusivamente slash para manter seus painéis privados/interativos. As respostas
-privadas por prefixo são enviadas por DM; `!vanta comprar` e a prévia de anúncio
-permanecem no canal para que seus botões funcionem. Também é possível mencionar
+`!yelow` é um alias. `/comprar` publica o catálogo no servidor; `/carrinho`,
+`/pedido`, `/estoque` e `/gerar pix` continuam slash. As respostas privadas por
+prefixo são enviadas por DM; `!vanta comprar` e a prévia de anúncio permanecem
+no canal para que seus botões funcionem. Também é possível mencionar
 o bot, por exemplo `@VANTA ping` ou `@VANTA missoes listar`; uma menção seguida
 de texto livre continua sendo uma conversa com a IA.
 
@@ -123,7 +133,8 @@ Para cadastrar uma Quest por prefixo, use argumentos `chave="valor"`:
 No primeiro `/comprar` ou `/config center`, o catálogo inicial é inserido
 somente para produtos que ainda não existem no servidor. Os estoques definidos
 no prompt são usados para os sete itens com quantidades conhecidas; os demais
-começam em 5, sem serem redefinidos em reinicializações. Custos não fornecidos
+recebem estoque aleatório entre 5 e 10 uma única vez, sem serem redefinidos em
+reinicializações. Custos não fornecidos
 não são inventados. A equipe deve configurar o custo do fornecedor no Config
 Center; o preço de venda é calculado como custo × 1,30.
 
@@ -136,10 +147,13 @@ configuração administrativa. As ações interativas também validam permissão
 servidor.
 
 O comando `/healty` exibe latência, uptime, memória, CPU e estado do SQLite e
-das integrações sem revelar credenciais. A seção MATRIX de Missões mostra
-contagens atuais. Relatórios financeiros, histórico `/minhas-compras` e
-feedback ainda não estão implementados. O gerenciador de anúncios está
-disponível por `/anuncio preparar`.
+das integrações sem revelar credenciais. MATRIX inclui gestão/auditoria de
+banners e avaliações. `/gerar pix` restringe a criação a administradores; o
+prazo informado é local e não expira a cobrança na Z.PAY. `/pedido` permite
+consultar pedidos e atualiza o status apenas por consulta autenticada ao
+provedor. `/estoque ajustar` exige justificativa e registra os valores anterior
+e novo. Relatórios financeiros e histórico `/minhas-compras` ainda não estão
+implementados. O gerenciador de anúncios está disponível por `/anuncio preparar`.
 
 ## VANTA MISSIONS
 
@@ -207,7 +221,8 @@ integração, a confirmação normal usa consulta autenticada ao status. Ambos o
 endpoints precisam ser publicados via HTTPS.
 
 `PAYMENT_PROVIDER` seleciona a ordem de tentativa (`zpay` por padrão,
-`voxpay` para priorizar VoxPay). Nenhuma cobrança real foi criada durante os
+`voxpay` para priorizar VoxPay). O Sandbox Z.PAY exige `PAYMENT_PROVIDER=zpay`
+e não habilita failover. Nenhuma cobrança real foi criada durante os
 testes.
 
 O Sandbox Z.PAY é opt-in por `ZPAY_ENVIRONMENT=sandbox`, usa a base

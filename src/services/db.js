@@ -224,8 +224,99 @@ export function openDatabase(path = process.env.DATABASE_PATH || 'data/vintermod
   `);
   ensureMissionSchema(db);
   ensurePaymentSchema(db);
+  ensureFeedbackSchema(db);
+  ensureCartNumberSchema(db);
+  ensureOrderSnapshotSchema(db);
+  ensureContributionSchema(db);
 
   return db;
+}
+
+export function ensureFeedbackSchema(db) {
+  const ticketColumns = new Set(db.prepare('PRAGMA table_info(tickets)')
+    .all().map(({ name }) => name));
+  if (!ticketColumns.has('closed_by')) {
+    db.exec('ALTER TABLE tickets ADD COLUMN closed_by TEXT');
+  }
+  if (!ticketColumns.has('close_after_at')) {
+    db.exec('ALTER TABLE tickets ADD COLUMN close_after_at TEXT');
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS order_feedback_requests (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL UNIQUE REFERENCES orders(id),
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      closed_by TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'dm_failed', 'submitted')),
+      created_at TEXT NOT NULL,
+      delivered_at TEXT,
+      failure_code TEXT
+    );
+    CREATE TABLE IF NOT EXISTS order_feedback (
+      order_id TEXT PRIMARY KEY REFERENCES orders(id),
+      request_id TEXT NOT NULL UNIQUE REFERENCES order_feedback_requests(id),
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      comment TEXT NOT NULL DEFAULT '',
+      submitted_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_order_feedback_requests_status
+      ON order_feedback_requests(status, created_at);
+  `);
+}
+
+export function ensureCartNumberSchema(db) {
+  const ticketColumns = new Set(db.prepare('PRAGMA table_info(tickets)')
+    .all().map(({ name }) => name));
+  if (!ticketColumns.has('cart_number')) {
+    db.exec('ALTER TABLE tickets ADD COLUMN cart_number INTEGER');
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cart_number_sequences (
+      guild_id TEXT PRIMARY KEY,
+      next_number INTEGER NOT NULL CHECK (next_number > 0)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_open_ticket_cart_number
+      ON tickets(guild_id, cart_number)
+      WHERE cart_number IS NOT NULL AND status IN ('creating', 'open');
+  `);
+}
+
+export function ensureOrderSnapshotSchema(db) {
+  const itemColumns = new Set(db.prepare('PRAGMA table_info(order_items)')
+    .all().map(({ name }) => name));
+  if (!itemColumns.has('unit_cost_cents')) {
+    db.exec(`
+      ALTER TABLE order_items ADD COLUMN unit_cost_cents INTEGER
+        CHECK (unit_cost_cents IS NULL OR unit_cost_cents >= 0)
+    `);
+  }
+}
+
+export function ensureContributionSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contribution_requests (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      category TEXT NOT NULL CHECK (category IN ('money', 'card', 'dreams', 'gift', 'partnership')),
+      channel_id TEXT UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('creating', 'open', 'in_service', 'closed')),
+      assigned_to TEXT,
+      opened_at TEXT NOT NULL,
+      closed_at TEXT,
+      result TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_contribution_requests_guild_status
+      ON contribution_requests(guild_id, status, opened_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_contribution_requests_active_user_category
+      ON contribution_requests(guild_id, user_id, category)
+      WHERE status IN ('creating', 'open', 'in_service');
+  `);
 }
 
 export function ensureMissionSchema(db) {
@@ -377,6 +468,12 @@ export function ensurePaymentSchema(db) {
       paid_at TEXT,
       event_type TEXT NOT NULL,
       received_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS manual_payment_requests (
+      order_id TEXT PRIMARY KEY REFERENCES orders(id),
+      requested_by TEXT NOT NULL,
+      local_expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
   `);
   const paymentColumns = new Set(db.prepare('PRAGMA table_info(payments)')

@@ -16,13 +16,17 @@ import {
 import { requestHuehueCompletion } from './huehue.js';
 
 const endpoint = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const maximumHistoryMessages = 12;
+const defaultHistoryMessages = 24;
+const minimumHistoryMessages = 6;
+const maximumConfiguredHistoryMessages = 40;
+const maximumHistoryCharacters = 24_000;
 const maximumMessageLength = 4000;
 const maximumReplyLength = 1800;
-const requestTimeoutMs = 20_000;
+const defaultRequestTimeoutMs = 18_000;
+const defaultFallbackTimeoutMs = 14_000;
 const rateLimitWindowMs = 60_000;
-const rateLimitMaximum = 4;
 const rateLimits = new Map();
+let lastRateLimitCleanupAt = 0;
 const toolDefinitions = [
   {
     type: 'function',
@@ -91,15 +95,51 @@ export class AiServiceError extends Error {
 
 function consumeRateLimit(userId) {
   const now = Date.now();
+  const maximum = getBoundedSetting('AI_RATE_LIMIT_PER_MINUTE', 4, 1, 20);
   const calls = (rateLimits.get(userId) || [])
     .filter((timestamp) => now - timestamp < rateLimitWindowMs);
 
-  if (calls.length >= rateLimitMaximum) {
+  if (calls.length >= maximum) {
     throw new AiServiceError('Você atingiu o limite temporário de mensagens para a IA.');
   }
 
   calls.push(now);
   rateLimits.set(userId, calls);
+  if (now - lastRateLimitCleanupAt >= rateLimitWindowMs) {
+    for (const [limitedUserId, timestamps] of rateLimits) {
+      const recent = timestamps.filter((timestamp) => now - timestamp < rateLimitWindowMs);
+      if (recent.length) rateLimits.set(limitedUserId, recent);
+      else rateLimits.delete(limitedUserId);
+    }
+    lastRateLimitCleanupAt = now;
+  }
+  while (rateLimits.size > 5000) {
+    rateLimits.delete(rateLimits.keys().next().value);
+  }
+}
+
+function getBoundedSetting(name, fallback, minimum, maximum) {
+  const value = Number.parseInt(process.env[name] ?? '', 10);
+  if (!Number.isSafeInteger(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function boundHistory(messages) {
+  const messageLimit = getBoundedSetting(
+    'AI_HISTORY_MESSAGES',
+    defaultHistoryMessages,
+    minimumHistoryMessages,
+    maximumConfiguredHistoryMessages,
+  );
+  let remainingCharacters = maximumHistoryCharacters;
+  const bounded = [];
+  for (const message of messages.slice(-messageLimit).toReversed()) {
+    const content = message.content.slice(0, remainingCharacters);
+    if (!content) break;
+    bounded.push({ ...message, content });
+    remainingCharacters -= content.length;
+  }
+  return bounded.toReversed();
 }
 
 function getHistory(db, guildId, channelId, userId) {
@@ -117,14 +157,14 @@ function getHistory(db, guildId, channelId, userId) {
     throw new AiServiceError('O histórico desta conversa está inválido.');
   }
 
-  return messages
+  return boundHistory(messages
     .filter((message) => ['user', 'assistant'].includes(message.role)
       && typeof message.content === 'string')
-    .slice(-maximumHistoryMessages);
+  );
 }
 
 function saveHistory(db, guildId, channelId, userId, messages) {
-  const bounded = messages.slice(-maximumHistoryMessages);
+  const bounded = boundHistory(messages);
 
   db.prepare(`
     INSERT INTO conversations (guild_id, channel_id, user_id, messages, updated_at)
@@ -342,27 +382,39 @@ async function requestCompletion(
   toolChoice = 'auto',
   fetchImpl = fetch,
 ) {
-  const response = await fetchImpl(endpoint, {
-    method: 'POST',
-    signal,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0.4,
-      max_tokens: 700,
-      stream: false,
-      reasoning_effort: 'low',
-      tools: toolDefinitions,
-      tool_choice: toolChoice,
-    }),
-  });
+  let response;
+  try {
+    response = await fetchImpl(endpoint, {
+      method: 'POST',
+      signal,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.4,
+        max_tokens: 700,
+        stream: false,
+        reasoning_effort: 'low',
+        tools: toolDefinitions,
+        tool_choice: toolChoice,
+      }),
+    });
+  } catch (cause) {
+    const error = new AiServiceError(
+      'Não foi possível conectar ao provedor NVIDIA.',
+      cause?.name || 'AiServiceError',
+    );
+    error.retryable = cause?.name !== 'AbortError' && cause?.name !== 'TimeoutError';
+    throw error;
+  }
 
   if (!response.ok) {
-    throw new AiServiceError(`Provedor de IA indisponível (HTTP ${response.status}).`);
+    const error = new AiServiceError(`Provedor de IA indisponível (HTTP ${response.status}).`);
+    error.retryable = response.status === 429 || response.status >= 500;
+    throw error;
   }
 
   const data = await response.json();
@@ -373,6 +425,30 @@ async function requestCompletion(
   }
 
   return message;
+}
+
+async function requestCompletionWithRetry(options) {
+  const maxRetries = getBoundedSetting('AI_RETRY_ATTEMPTS', 1, 0, 2);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestCompletion(...options);
+    } catch (error) {
+      if (!error.retryable || attempt >= maxRetries || options[3]?.aborted) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+}
+
+async function requestHuehueWithRetry(options) {
+  const maxRetries = getBoundedSetting('AI_RETRY_ATTEMPTS', 1, 0, 2);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestHuehueCompletion(options);
+    } catch (error) {
+      if (!error.retryable || attempt >= maxRetries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
 }
 
 function responseComponents(draftId) {
@@ -440,6 +516,7 @@ export async function respondToMessage({
   const conversationMessages = [...messages];
 
   const controller = new AbortController();
+  const requestTimeoutMs = getBoundedSetting('AI_REQUEST_TIMEOUT_MS', defaultRequestTimeoutMs, 5000, 30000);
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
   let reply;
   let providerLabel;
@@ -450,15 +527,18 @@ export async function respondToMessage({
     let nvidiaError;
     if (apiKey) {
       try {
-        const model = await resolveAvailableNvidiaModel(preferredModel, apiKey, { fetchImpl });
-        let finalMessage = await requestCompletion(
+        const model = await resolveAvailableNvidiaModel(preferredModel, apiKey, {
+          fetchImpl,
+          timeoutMs: Math.min(requestTimeoutMs, 8000),
+        });
+        let finalMessage = await requestCompletionWithRetry([
           apiKey,
           model,
           messages,
           controller.signal,
           'auto',
           fetchImpl,
-        );
+        ]);
 
         if (finalMessage.tool_calls?.length) {
           messages.push({
@@ -497,14 +577,14 @@ export async function respondToMessage({
             });
           }
 
-          finalMessage = await requestCompletion(
+          finalMessage = await requestCompletionWithRetry([
             apiKey,
             model,
             messages,
             controller.signal,
             'none',
             fetchImpl,
-          );
+          ]);
         }
 
         reply = (typeof finalMessage.content === 'string' && finalMessage.content.trim())
@@ -530,10 +610,16 @@ export async function respondToMessage({
       }
 
       try {
-        reply = await requestHuehueCompletion({
+        reply = await requestHuehueWithRetry({
           apiKey: huehueApiKey,
           message: buildHuehuePrompt(conversationMessages),
           fetchImpl,
+          timeoutMs: getBoundedSetting(
+            'AI_FALLBACK_TIMEOUT_MS',
+            defaultFallbackTimeoutMs,
+            5000,
+            30000,
+          ),
         });
         providerLabel = 'Huehue GPT-5 mini';
       } catch (error) {

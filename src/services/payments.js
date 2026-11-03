@@ -13,6 +13,7 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import { BRAND, withBrandSignature } from '../config/brand.js';
+import { getBannerUrl } from '../config/banners.js';
 import { withTransaction, writeAuditLog } from './db.js';
 import { formatMoney } from './commerce.js';
 
@@ -674,25 +675,37 @@ export function startPaymentWebhookServer({
 
 export const startZpayWebhookServer = startPaymentWebhookServer;
 
-export function buildPixMessage(payment, order) {
+export function buildPixMessage(payment, order, db = null, {
+  localExpiresAt = null,
+  includePaymentRefresh = true,
+} = {}) {
   const isSandbox = payment.environment === 'sandbox';
   const embed = withBrandSignature(new EmbedBuilder()
     .setColor(BRAND.colors.white)
     .setTitle(isSandbox ? 'Pagamento Pix · SANDBOX' : 'Pagamento Pix')
     .setDescription([
       `Pedido: \`${order.id}\``,
+      `Identificador da cobrança: \`${payment.provider_payment_id || payment.id}\``,
+      payment.created_at ? `Criada em: <t:${Math.floor(Date.parse(payment.created_at) / 1000)}:F>` : null,
       `Valor: **${formatMoney(payment.amount_cents)}**`,
       `Status: **${payment.status}**`,
       payment.expires_at ? `Validade: <t:${Math.floor(Date.parse(payment.expires_at) / 1000)}:F>` : null,
+      localExpiresAt ? `Prazo local: <t:${Math.floor(Date.parse(localExpiresAt) / 1000)}:F> (não altera a validade no provedor).` : null,
       isSandbox ? '**Teste fictício: não representa pagamento real e não libera entrega.**' : null,
     ].filter(Boolean).join('\n')));
   const files = [];
-  const rows = [new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`order:payment:${order.id}`)
-      .setLabel('Verificar pagamento')
-      .setStyle(ButtonStyle.Secondary),
-  )];
+  const paymentBanner = withBrandSignature(new EmbedBuilder()
+    .setColor(BRAND.colors.surface)
+    .setTitle('VANTA | Pagamentos')
+    .setImage(getBannerUrl(db, order.guild_id, 'payments')));
+  const rows = includePaymentRefresh
+    ? [new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`order:payment:${order.id}`)
+        .setLabel('Verificar pagamento')
+        .setStyle(ButtonStyle.Secondary),
+    )]
+    : [];
 
   if (payment.copy_paste) {
     const pixCode = payment.copy_paste.replace(/[\r\n`]/g, '').slice(0, 1000);
@@ -703,7 +716,7 @@ export function buildPixMessage(payment, order) {
     if (match) {
       const image = Buffer.from(match[2], 'base64');
       if (image.length > maximumQrImageBytes) {
-        return { embeds: [embed], components: rows, files };
+        return { embeds: [embed, paymentBanner], components: rows, files };
       }
       const extension = match[1] === 'jpeg' ? 'jpg' : 'png';
       const filename = `pix-${order.id}.${extension}`;
@@ -712,5 +725,5 @@ export function buildPixMessage(payment, order) {
     }
   }
 
-  return { embeds: [embed], components: rows, files };
+  return { embeds: [embed, paymentBanner], components: rows, files };
 }

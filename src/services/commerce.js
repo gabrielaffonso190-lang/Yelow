@@ -1,11 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import {
   ChannelType,
   PermissionFlagsBits,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  EmbedBuilder,
 } from 'discord.js';
+import { getBannerUrl } from '../config/banners.js';
 import {
   getGuildSettings,
   withTransaction,
@@ -71,19 +73,19 @@ export const DEFAULT_CATALOG_PRODUCTS = [
     ['Conta Spotify — 3 meses', 'Contas Spotify', 'Conta Spotify com duração de 3 meses.', 0],
     ['YouTube Premium por link — 1 mês', 'YouTube Premium', 'Ativação por link com duração de 1 mês.', 33],
     ['YouTube Premium na própria conta — 1 mês', 'YouTube Premium', 'Ativação na própria conta com duração de 1 mês.', 4],
-    ['Robux', 'Robux', 'Solicite entre 100 e 17.000 Robux. O custo para a quantidade escolhida precisa ser confirmado pela equipe.', 5],
-    ['Discord Nitro', 'Discord Nitro', 'Duração, preço e disponibilidade precisam ser confirmados pela equipe.', 5],
+    ['Robux', 'Robux', 'Solicite entre 100 e 17.000 Robux. O custo para a quantidade escolhida precisa ser confirmado pela equipe.', null],
+    ['Discord Nitro', 'Discord Nitro', 'Duração, preço e disponibilidade precisam ser confirmados pela equipe.', null],
     ...Array.from({ length: 12 }, (_, index) => {
       const year = 2015 + index;
-      return [`Conta Discord — ${year}`, 'Contas Discord', `Conta do ano ${year}; preço e disponibilidade sujeitos a confirmação.`, 5];
+      return [`Conta Discord — ${year}`, 'Contas Discord', `Conta do ano ${year}; preço e disponibilidade sujeitos a confirmação.`, null];
     }),
     ...[2, 4, 6, 14].map((boosts) => [
       `Impulsos de servidor — ${boosts}x`,
       'Impulsos de servidor',
       `${boosts} impulsos. A duração precisa ser confirmada pela equipe.`,
-      5,
+      null,
     ]),
-    ['GamePass — solicitação personalizada', 'GamePass', 'Informe qual GamePass deseja. A equipe confirma o preço antes de qualquer pagamento.', 5],
+    ['GamePass — solicitação personalizada', 'GamePass', 'Informe qual GamePass deseja. A equipe confirma o preço antes de qualquer pagamento.', null],
 ];
 
 export function ensureDefaultCatalog(db, guildId) {
@@ -99,13 +101,14 @@ export function ensureDefaultCatalog(db, guildId) {
   return withTransaction(db, () => {
     let inserted = 0;
     for (const [name, category, description, stock] of products) {
+      const initialStock = stock ?? randomInt(5, 11);
       inserted += Number(insert.run(
         randomUUID(),
         guildId,
         name,
         description,
         category,
-        stock,
+        initialStock,
         now,
       ).changes);
     }
@@ -369,24 +372,50 @@ function reserveOrder(db, guildId, userId) {
     );
 
     const insertItem = db.prepare(`
-      INSERT INTO order_items (order_id, product_id, product_name, unit_price_cents, quantity)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO order_items
+        (order_id, product_id, product_name, unit_price_cents, unit_cost_cents, quantity)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     const reserve = db.prepare(`
       INSERT INTO inventory_reservations (order_id, product_id, quantity) VALUES (?, ?, ?)
     `);
 
     for (const item of items) {
-      insertItem.run(orderId, item.product_id, item.name, item.price_cents, item.quantity);
+      insertItem.run(
+        orderId,
+        item.product_id,
+        item.name,
+        item.price_cents,
+        item.cost_cents,
+        item.quantity,
+      );
       if (item.stock !== null) {
         reserve.run(orderId, item.product_id, item.quantity);
       }
     }
 
+    const activeCarts = db.prepare(`
+      SELECT COUNT(*) AS count FROM tickets
+      WHERE guild_id = ? AND status IN ('creating', 'open')
+    `).get(guildId).count;
+    const sequence = db.prepare(`
+      SELECT next_number FROM cart_number_sequences WHERE guild_id = ?
+    `).get(guildId);
+    const highestNumber = db.prepare(`
+      SELECT COALESCE(MAX(cart_number), 0) AS highest FROM tickets WHERE guild_id = ?
+    `).get(guildId).highest;
+    const cartNumber = activeCarts === 0
+      ? 1
+      : Math.max(sequence?.next_number ?? 1, highestNumber + 1, activeCarts + 1);
     db.prepare(`
-      INSERT INTO tickets (order_id, guild_id, status, opened_at)
-      VALUES (?, ?, 'creating', ?)
-    `).run(orderId, guildId, now);
+      INSERT INTO cart_number_sequences (guild_id, next_number) VALUES (?, ?)
+      ON CONFLICT(guild_id) DO UPDATE SET next_number = excluded.next_number
+    `).run(guildId, cartNumber + 1);
+
+    db.prepare(`
+      INSERT INTO tickets (order_id, guild_id, status, opened_at, cart_number)
+      VALUES (?, ?, 'creating', ?, ?)
+    `).run(orderId, guildId, now, cartNumber);
 
     if (coupon) {
       db.prepare(`
@@ -480,7 +509,7 @@ export async function createOrderTicket({ db, guild, user, botUserId }) {
   let channel;
   try {
     channel = await guild.channels.create({
-      name: `pedido-${orderIdShort}`,
+      name: `🛒┃𝖢𝖺𝗋𝗋𝗂𝗇𝗁𝗈${ticket.cart_number}`,
       type: ChannelType.GuildText,
       ...(settings.ticketCategoryId ? { parent: settings.ticketCategoryId } : {}),
       permissionOverwrites: ticketOverwrites(guild, user.id, botUserId, allowedStaffRoles),
@@ -509,6 +538,7 @@ export async function createOrderTicket({ db, guild, user, botUserId }) {
       content: [
         allowedStaffRoles.map((id) => `<@&${id}>`).join(' '),
         `Pedido \`${reservation.orderId}\` de <@${user.id}>`,
+        'Olá! Seu carrinho foi criado com sucesso. Aguarde um instante até que um membro da nossa equipe venha atendê-lo. Enquanto isso, você pode enviar suas dúvidas por aqui. Nossa assistente poderá ajudar com informações sobre produtos, pagamentos e pedidos.',
         ...lines,
         `Subtotal: ${formatMoney(order.subtotal_cents)}`,
         `Desconto: ${formatMoney(order.discount_cents)}`,
@@ -516,23 +546,27 @@ export async function createOrderTicket({ db, guild, user, botUserId }) {
         '',
         'Status: aguardando atendimento. O pagamento só será confirmado após validação pelo provedor.',
       ].filter(Boolean).join('\n'),
+      embeds: [new EmbedBuilder()
+        .setColor(0x090909)
+        .setTitle('VANTA | Carrinho privado')
+        .setImage(getBannerUrl(db, guild.id, 'cart'))],
       allowedMentions: { users: [user.id], roles: allowedStaffRoles },
       components: [new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`order:refresh:${reservation.orderId}`)
-          .setLabel('Atualizar pedido')
+          .setLabel('Consultar carrinho')
           .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
           .setCustomId(`order:support:${reservation.orderId}`)
-          .setLabel('Solicitar suporte')
+          .setLabel('Chamar equipe')
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
           .setCustomId(`order:cancel:${reservation.orderId}`)
-          .setLabel('Cancelar pedido')
+          .setLabel('Cancelar carrinho')
           .setStyle(ButtonStyle.Danger),
         new ButtonBuilder()
           .setCustomId(`order:close:${reservation.orderId}`)
-          .setLabel('Fechar pedido')
+          .setLabel('Encerrar carrinho')
           .setStyle(ButtonStyle.Danger),
       )],
     });
@@ -579,13 +613,20 @@ export async function createOrderTicket({ db, guild, user, botUserId }) {
 
 export function closeOrderTicket(db, guildId, orderId, actorId) {
   const ticket = db.prepare(
-    'SELECT * FROM tickets WHERE order_id = ? AND guild_id = ? AND status = ?',
-  ).get(orderId, guildId, 'open');
+    'SELECT * FROM tickets WHERE order_id = ? AND guild_id = ?',
+  ).get(orderId, guildId);
 
   if (!ticket) {
     throw new CommerceError('Este ticket já foi encerrado ou não existe.');
   }
+  if (ticket.status === 'closed') {
+    return { ...ticket, feedbackCreated: false };
+  }
 
+  const now = new Date();
+  const closedAt = now.toISOString();
+  const closeAfterAt = new Date(now.getTime() + 15_000).toISOString();
+  const feedbackRequestId = randomUUID();
   withTransaction(db, () => {
     const activePayment = db.prepare(`
       SELECT status FROM payments WHERE order_id = ?
@@ -600,8 +641,9 @@ export function closeOrderTicket(db, guildId, orderId, actorId) {
 
     const now = new Date().toISOString();
     db.prepare(`
-      UPDATE tickets SET status = 'closed', closed_at = ? WHERE order_id = ?
-    `).run(now, orderId);
+      UPDATE tickets SET status = 'closed', closed_at = ?, closed_by = ?, close_after_at = ?
+      WHERE order_id = ? AND status = 'open'
+    `).run(closedAt, actorId, closeAfterAt, orderId);
     db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'pending'")
       .run(orderId);
     db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'in_service'")
@@ -612,10 +654,37 @@ export function closeOrderTicket(db, guildId, orderId, actorId) {
       UPDATE carts SET checkout_order_id = NULL
       WHERE guild_id = ? AND checkout_order_id = ?
     `).run(guildId, orderId);
-    writeAuditLog(db, guildId, actorId, 'ticket.closed', { orderId });
+    db.prepare(`
+      INSERT INTO order_feedback_requests
+        (id, order_id, guild_id, user_id, channel_id, closed_by, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+      ON CONFLICT(order_id) DO NOTHING
+    `).run(
+      feedbackRequestId,
+      orderId,
+      guildId,
+      db.prepare('SELECT user_id FROM orders WHERE id = ?').get(orderId).user_id,
+      ticket.channel_id,
+      actorId,
+      closedAt,
+    );
+    writeAuditLog(db, guildId, actorId, 'ticket.closed', {
+      orderId,
+      channelId: ticket.channel_id,
+      closeAfterAt,
+      feedbackRequestId,
+    });
   });
 
-  return ticket;
+  return {
+    ...ticket,
+    status: 'closed',
+    closed_at: closedAt,
+    closed_by: actorId,
+    close_after_at: closeAfterAt,
+    feedbackCreated: true,
+    feedbackRequestId,
+  };
 }
 
 export function createCoupon(db, {

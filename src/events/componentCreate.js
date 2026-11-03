@@ -3,6 +3,7 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  UserSelectMenuBuilder,
 } from 'discord.js';
 import {
   applyCartCoupon,
@@ -17,9 +18,10 @@ import {
 } from '../services/commerce.js';
 import {
   closeSupportTicket,
+  createContributionTicket,
   createSupportTicket,
 } from '../services/customization.js';
-import { getGuildSettings, writeAuditLog } from '../services/db.js';
+import { getGuildSettings, withTransaction, writeAuditLog } from '../services/db.js';
 import { getOperationalRoleIds, isStaff } from '../services/permissions.js';
 import {
   buildCartView,
@@ -32,9 +34,15 @@ import {
   handleConfigurationModal,
 } from '../services/configuration.js';
 import { handleDraftInteraction } from '../services/ai.js';
-import { handleMatrixInteraction } from '../services/matrix.js';
+import { handleMatrixInteraction, handleMatrixModal } from '../services/matrix.js';
 import { handleAnnouncementInteraction } from '../services/announcements.js';
 import { handleMissionViewInteraction } from '../services/missions.js';
+import {
+  handleFeedbackInteraction,
+  handleFeedbackModal,
+  scheduleClosedTicketDeletion,
+  sendOrderFeedbackRequest,
+} from '../services/feedback.js';
 import {
   buildPixMessage,
   createOrderPayment,
@@ -362,11 +370,20 @@ async function handleOrderButton(interaction, services) {
       return true;
     }
 
-    closeOrderTicket(db, interaction.guildId, orderId, interaction.user.id);
-    await interaction.channel.permissionOverwrites.edit(result.order.user_id, {
-      SendMessages: false,
-    });
-    await interaction.channel.send('O comprador cancelou o pedido. Nenhum pagamento foi processado.');
+    const closedTicket = closeOrderTicket(db, interaction.guildId, orderId, interaction.user.id);
+    if (!closedTicket.feedbackCreated) {
+      await interaction.reply({ content: 'Este carrinho já foi encerrado.', ephemeral: true });
+      return true;
+    }
+    scheduleClosedTicketDeletion({ db, client: interaction.client, ticket: closedTicket });
+    try {
+      await interaction.channel.permissionOverwrites.edit(result.order.user_id, {
+        SendMessages: false,
+      });
+      await interaction.channel.send('O comprador cancelou o pedido. Nenhum pagamento foi processado.');
+    } finally {
+      await sendOrderFeedbackRequest({ db, client: interaction.client, orderId });
+    }
     await interaction.reply({ content: 'Pedido cancelado e registrado.', ephemeral: true });
     return true;
   }
@@ -388,11 +405,20 @@ async function handleOrderButton(interaction, services) {
       });
       return true;
     }
-    closeOrderTicket(db, interaction.guildId, orderId, interaction.user.id);
-    await interaction.channel.permissionOverwrites.edit(result.order.user_id, {
-      SendMessages: false,
-    });
-    await interaction.channel.send('O ticket foi encerrado pela equipe. Nenhum pagamento foi processado.');
+    const closedTicket = closeOrderTicket(db, interaction.guildId, orderId, interaction.user.id);
+    if (!closedTicket.feedbackCreated) {
+      await interaction.reply({ content: 'Este carrinho já foi encerrado.', ephemeral: true });
+      return true;
+    }
+    scheduleClosedTicketDeletion({ db, client: interaction.client, ticket: closedTicket });
+    try {
+      await interaction.channel.permissionOverwrites.edit(result.order.user_id, {
+        SendMessages: false,
+      });
+      await interaction.channel.send('O ticket foi encerrado pela equipe. Nenhum pagamento foi processado.');
+    } finally {
+      await sendOrderFeedbackRequest({ db, client: interaction.client, orderId });
+    }
     await interaction.reply({ content: 'Pedido encerrado e registrado.', ephemeral: true });
     return true;
   }
@@ -437,7 +463,125 @@ async function handleSupportButton(interaction, db) {
   return true;
 }
 
+async function handleContributionComponent(interaction, db) {
+  if (interaction.isStringSelectMenu() && interaction.customId === 'contributor:category') {
+    const category = interaction.values[0];
+    await interaction.deferReply({ ephemeral: true });
+    const result = await createContributionTicket({
+      db,
+      guild: interaction.guild,
+      user: interaction.user,
+      botUserId: interaction.client.user.id,
+      category,
+    });
+    await interaction.editReply(`${result.duplicate ? 'Sua solicitação continua aberta:' : 'Solicitação criada:'} ${result.channel}`);
+    return true;
+  }
+
+  const isTransferSelect = interaction.isUserSelectMenu()
+    && interaction.customId.startsWith('contribution:transfer:');
+  if (!interaction.customId.startsWith('contribution:') || (!interaction.isButton() && !isTransferSelect)) {
+    return false;
+  }
+  const [, action, requestId] = interaction.customId.split(':');
+  const request = db.prepare(`
+    SELECT * FROM contribution_requests WHERE id = ? AND guild_id = ?
+  `).get(requestId, interaction.guildId);
+  if (!request || request.channel_id !== interaction.channelId
+    || !['open', 'in_service'].includes(request.status)) {
+    await interaction.reply({ content: 'Esta solicitação já foi encerrada ou não existe.', ephemeral: true });
+    return true;
+  }
+
+  if (action === 'contact' && interaction.user.id === request.user_id) {
+    const roles = getOperationalRoleIds(db, interaction.guildId, interaction.guild);
+    await interaction.channel.send({
+      content: `${roles.map((roleId) => `<@&${roleId}>`).join(' ')} <@${request.user_id}> chamou a equipe para esta solicitação.`,
+      allowedMentions: { users: [], roles },
+    });
+    writeAuditLog(db, interaction.guildId, interaction.user.id, 'contribution.staff_requested', {
+      requestId,
+      channelId: interaction.channelId,
+    });
+    await interaction.reply({ content: 'A equipe foi avisada.', ephemeral: true });
+    return true;
+  }
+
+  if (!isStaff(interaction, db)) {
+    await interaction.reply({ content: 'Somente a equipe autorizada pode administrar a solicitação.', ephemeral: true });
+    return true;
+  }
+
+  if (action === 'claim') {
+    withTransaction(db, () => {
+      db.prepare(`
+        UPDATE contribution_requests SET status = 'in_service', assigned_to = ?
+        WHERE id = ? AND status IN ('open', 'in_service')
+      `).run(interaction.user.id, requestId);
+      writeAuditLog(db, interaction.guildId, interaction.user.id, 'contribution.claimed', {
+        requestId,
+        previousAssignee: request.assigned_to,
+      });
+    });
+    await interaction.channel.send(`<@${interaction.user.id}> assumiu este atendimento.`);
+    await interaction.reply({ content: 'Atendimento atribuído a você.', ephemeral: true });
+    return true;
+  }
+
+  if (action === 'transfer' && isTransferSelect) {
+    const nextAssignee = interaction.users.first();
+    if (!nextAssignee) {
+      await interaction.reply({ content: 'Selecione um membro da equipe.', ephemeral: true });
+      return true;
+    }
+    withTransaction(db, () => {
+      db.prepare(`
+        UPDATE contribution_requests SET status = 'in_service', assigned_to = ?
+        WHERE id = ? AND status IN ('open', 'in_service')
+      `).run(nextAssignee.id, requestId);
+      writeAuditLog(db, interaction.guildId, interaction.user.id, 'contribution.transferred', {
+        requestId,
+        previousAssignee: request.assigned_to,
+        nextAssignee: nextAssignee.id,
+      });
+    });
+    await interaction.channel.send(`Atendimento transferido para <@${nextAssignee.id}>.`);
+    await interaction.update({ content: 'Atendimento transferido.', components: [] });
+    return true;
+  }
+
+  if (action === 'transfer') {
+    const userSelect = new UserSelectMenuBuilder()
+      .setCustomId(`contribution:transfer:${requestId}`)
+      .setPlaceholder('Selecionar membro para transferência')
+      .setMinValues(1)
+      .setMaxValues(1);
+    await interaction.reply({
+      content: 'Selecione o membro que assumirá este atendimento.',
+      components: [new ActionRowBuilder().addComponents(userSelect)],
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  if (action === 'close') {
+    await interaction.showModal(makeModal(
+      `contribution:close:${requestId}`,
+      'Encerrar solicitação',
+      'result',
+      'Resultado do atendimento',
+      { paragraph: true, maxLength: 500 },
+    ));
+    return true;
+  }
+
+  return false;
+}
+
 export async function handleComponentInteraction(interaction, services) {
+  if (interaction.customId.startsWith('feedback:')) {
+    return handleFeedbackInteraction(interaction, services);
+  }
   if (!isGuildInteraction(interaction)) {
     return false;
   }
@@ -519,7 +663,7 @@ export async function handleComponentInteraction(interaction, services) {
         providerOrder: services.payments.providerOrder,
       });
       const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(result.orderId);
-      await result.channel.send(buildPixMessage(payment, order));
+      await result.channel.send(buildPixMessage(payment, order, db));
       await interaction.editReply([
         result.duplicate ? `Pedido \`${result.orderId}\` já estava aberto.` : `Pedido \`${result.orderId}\` criado.`,
         payment.status === 'paid' ? 'Pagamento confirmado pelo provedor.' : 'Cobrança Pix pronta.',
@@ -553,6 +697,12 @@ export async function handleComponentInteraction(interaction, services) {
 }
 
 export async function handleModalSubmit(interaction, services) {
+  if (interaction.customId.startsWith('feedback:')) {
+    return handleFeedbackModal(interaction, services);
+  }
+  if (interaction.customId.startsWith('matrix:banner-url:')) {
+    return handleMatrixModal(interaction, services);
+  }
   if (!isGuildInteraction(interaction)) {
     return false;
   }

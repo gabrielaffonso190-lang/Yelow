@@ -307,7 +307,7 @@ test('refreshes only from provider status and requires a matching amount', async
   db.close();
 });
 
-test('configures Z.PAY from backend environment values and defaults it as primary', () => {
+test('configures payment providers and defaults Z.PAY as primary', () => {
   class FakeClient {
     constructor(options) {
       this.options = options;
@@ -328,6 +328,48 @@ test('configures Z.PAY from backend environment values and defaults it as primar
   assert.deepEqual(getPaymentProviderOrder({ PAYMENT_PROVIDER: 'voxpay' }), ['voxpay', 'zpay']);
   assert.throws(() => getPaymentProviderOrder({ PAYMENT_PROVIDER: 'other' }), /must be zpay or voxpay/);
   assert.deepEqual(createPaymentProviders({}).providers, {});
+});
+
+test('Z.PAY SDK uses the documented payments API, server credentials, and camelCase fields', async () => {
+  const requests = [];
+  const provider = createZpayProvider({
+    clientId: 'zpk_test_client',
+    clientSecret: 'zsk_test_secret',
+    apiUrl: 'https://zpaysolution.com/api/v1',
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return new Response(JSON.stringify({
+        paymentId: 'zpay-doc-payment',
+        amount: 25,
+        status: 'pending',
+        copyPaste: '000201-test',
+        qrCodeBase64: 'data:image/png;base64,aGVsbG8=',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+
+  const created = await provider.createPayment({
+    amount: 25,
+    payerName: 'Maria Silva',
+    description: 'Pedido #1001',
+    idempotencyKey: 'order-1001',
+  });
+  assert.equal(created.paymentId, 'zpay-doc-payment');
+  assert.match(requests[0].url, /^https:\/\/zpaysolution\.com\/api\/v1\/payments$/);
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.headers['client-id'], 'zpk_test_client');
+  assert.equal(requests[0].options.headers['client-secret'], 'zsk_test_secret');
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    amount: 25,
+    payerName: 'Maria Silva',
+    description: 'Pedido #1001',
+    idempotencyKey: 'order-1001',
+  });
+
+  const current = await provider.getPayment(created.paymentId);
+  assert.equal(current.status, 'pending');
+  assert.equal(requests[1].url, 'https://zpaysolution.com/api/v1/payments/zpay-doc-payment');
+  assert.equal(requests[1].options.method, 'GET');
 });
 
 test('Z.PAY Sandbox is isolated and simulation cannot be enabled in production', async () => {

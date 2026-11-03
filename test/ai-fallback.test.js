@@ -112,3 +112,72 @@ test('Huehue works when NVIDIA is not configured', async () => {
     context.db.close();
   });
 });
+
+test('NVIDIA retries a transient failure once and preserves the newest extended conversation context', async () => {
+  await withEnv({
+    NVIDIA_API_KEY: 'nvidia-test-key',
+    HUEHUE_API_KEY: undefined,
+    AI_RETRY_ATTEMPTS: '1',
+    AI_HISTORY_MESSAGES: '24',
+  }, async () => {
+    const context = requestContext();
+    const history = Array.from({ length: 40 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `historico-${index}`,
+    }));
+    context.db.prepare(`
+      INSERT INTO conversations (guild_id, channel_id, user_id, messages, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run('guild-1', 'channel-1', 'user-1', JSON.stringify(history), new Date().toISOString());
+
+    clearNvidiaModelCache();
+    let completionAttempts = 0;
+    let prompt;
+    const result = await respondToMessage({
+      ...context,
+      fetchImpl: async (url, options) => {
+        if (String(url).endsWith('/models')) {
+          return Response.json({ data: [{ id: 'openai/gpt-oss-20b' }] });
+        }
+        completionAttempts += 1;
+        assert.ok(options.signal);
+        prompt = JSON.parse(options.body).messages;
+        if (completionAttempts === 1) return new Response('temporarily unavailable', { status: 503 });
+        return Response.json({ choices: [{ message: { content: 'Resposta recuperada.' } }] });
+      },
+    });
+
+    assert.equal(completionAttempts, 2);
+    assert.match(result.content, /Resposta recuperada/);
+    assert.ok(prompt.some((message) => message.content === 'historico-39'));
+    assert.ok(!prompt.some((message) => message.content === 'historico-0'));
+    assert.equal(JSON.parse(context.db.prepare(
+      'SELECT messages FROM conversations WHERE guild_id = ? AND channel_id = ? AND user_id = ?',
+    ).get('guild-1', 'channel-1', 'user-1').messages).length, 24);
+    context.db.close();
+  });
+});
+
+test('Huehue retries one transient 502 and returns the recovered answer', async () => {
+  await withEnv({
+    NVIDIA_API_KEY: undefined,
+    HUEHUE_API_KEY: 'huehue-test-key',
+    AI_RETRY_ATTEMPTS: '1',
+  }, async () => {
+    const context = requestContext();
+    let attempts = 0;
+    const result = await respondToMessage({
+      ...context,
+      fetchImpl: async () => {
+        attempts += 1;
+        if (attempts === 1) return new Response('upstream unavailable', { status: 502 });
+        return new Response('Serviço recuperado.', {
+          headers: { 'content-type': 'text/plain' },
+        });
+      },
+    });
+    assert.equal(attempts, 2);
+    assert.match(result.content, /Serviço recuperado/);
+    context.db.close();
+  });
+});

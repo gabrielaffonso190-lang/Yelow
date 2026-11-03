@@ -1,7 +1,7 @@
 const modelsEndpoint = 'https://integrate.api.nvidia.com/v1/models';
 export const DEFAULT_NVIDIA_MODEL = 'openai/gpt-oss-20b';
 const knownModels = new Set([DEFAULT_NVIDIA_MODEL]);
-const cacheDurationMs = 60_000;
+const cacheDurationMs = 5 * 60_000;
 
 let cachedModels;
 let cacheExpiresAt = 0;

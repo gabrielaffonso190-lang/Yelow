@@ -3,6 +3,7 @@ import { missionsCommand } from './missions.js';
 import { healtyCommand } from './healty.js';
 import { announcementCommand } from './announcement.js';
 import { configCommand } from './config.js';
+import { generateCommand, orderCommand, stockCommand } from './operations.js';
 import {
   cartCommand,
   conversationCommand,
@@ -20,4 +21,7 @@ export const commands = [
   customizeCommand,
   conversationCommand,
   missionsCommand,
+  generateCommand,
+  orderCommand,
+  stockCommand,
 ];

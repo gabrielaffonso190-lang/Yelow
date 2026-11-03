@@ -4,6 +4,7 @@ import {
   emojiComponent,
   emojiText,
   getApplicationEmoji,
+  getUnavailableApplicationEmojis,
   loadApplicationEmojis,
 } from '../src/config/emojis.js';
 
@@ -44,4 +45,23 @@ test('application emojis load by configured snowflake IDs and retain name compat
     animated: true,
   });
   assert.equal(emojiText('success'), success.toString());
+});
+
+test('official category emoji IDs load and unavailable IDs have a Unicode fallback', async () => {
+  const discordAccounts = {
+    id: '1567294072698175509',
+    name: 'vanta_discord_accounts',
+    animated: false,
+    toString: () => '<:vanta_discord_accounts:1567294072698175509>',
+  };
+  const emojis = new Map([[discordAccounts.id, discordAccounts]]);
+  emojis.find = (predicate) => [...emojis.values()].find(predicate);
+  await loadApplicationEmojis({
+    application: { fetch: async () => {}, emojis: { fetch: async () => emojis } },
+  }, {});
+
+  assert.equal(getApplicationEmoji('discordAccounts'), discordAccounts);
+  assert.deepEqual(emojiComponent('partnership'), { name: '🤝' });
+  assert.equal(emojiText('partnership'), '🤝');
+  assert.ok(getUnavailableApplicationEmojis().includes('partnership'));
 });

@@ -25,7 +25,11 @@ import {
   updateStaffRoles,
   writeAuditLog,
 } from './db.js';
-import { appendUploadedImageToPanel, buildSupportPanel } from './customization.js';
+import {
+  appendUploadedImageToPanel,
+  buildContributorPanel,
+  buildSupportPanel,
+} from './customization.js';
 import { isAdmin } from './permissions.js';
 import { buildShopView, configurationSection } from './ui.js';
 import { DEFAULT_NVIDIA_MODEL } from './nvidia.js';
@@ -252,6 +256,7 @@ export async function handleConfigurationComponent(interaction, services) {
       'shopChannelId',
       'logChannelId',
       'ticketPanelChannelId',
+      'contributorPanelChannelId',
       'missionAnnouncementChannelId',
     ]);
     const allowedChannels = new Set([
@@ -784,7 +789,12 @@ export async function handleConfigurationComponent(interaction, services) {
 
   if (interaction.isButton() && action === 'publish') {
     const { settings } = getGuildSettings(db, interaction.guildId);
-    const channelId = key === 'shop' ? settings.shopChannelId : settings.ticketPanelChannelId;
+    const channelSetting = {
+      shop: 'shopChannelId',
+      tickets: 'ticketPanelChannelId',
+      contributor: 'contributorPanelChannelId',
+    }[key];
+    const channelId = channelSetting ? settings[channelSetting] : null;
     const channel = channelId
       ? await interaction.guild.channels.fetch(channelId).catch((error) => {
         if (error?.code === 10003) {
@@ -826,7 +836,7 @@ export async function handleConfigurationComponent(interaction, services) {
       });
       audit(interaction, db, 'panel.shop.published', { channelId });
       await replyEphemeral(interaction, `Painel de compras publicado ou atualizado em <#${channelId}> (${message.id}).`);
-    } else {
+    } else if (key === 'tickets') {
       let view = buildSupportPanel(db, interaction.guildId);
       if (settings.ticketImageAssetId) {
         view = appendUploadedImageToPanel({
@@ -847,6 +857,16 @@ export async function handleConfigurationComponent(interaction, services) {
       });
       audit(interaction, db, 'panel.support.published', { channelId });
       await replyEphemeral(interaction, `Painel de atendimento publicado ou atualizado em <#${channelId}> (${message.id}).`);
+    } else {
+      const message = await publishPanel({
+        db,
+        guild: interaction.guild,
+        channel,
+        setting: 'contributorPanel',
+        view: buildContributorPanel(db, interaction.guildId),
+      });
+      audit(interaction, db, 'panel.contributor.published', { channelId, messageId: message.id });
+      await replyEphemeral(interaction, `Painel Contribuidor & Parcerias publicado ou atualizado em <#${channelId}> (${message.id}).`);
     }
 
     return true;

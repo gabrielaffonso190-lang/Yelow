@@ -1,11 +1,23 @@
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import {
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   EmbedBuilder,
+  ModalBuilder,
   StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from 'discord.js';
-import { getGuildSettings, updateGuildSettings, writeAuditLog } from './db.js';
+import {
+  getGuildSettings,
+  updateGuildSettings,
+  withTransaction,
+  writeAuditLog,
+} from './db.js';
 import { BRAND, withBrandSignature } from '../config/brand.js';
+import { getBannerUrl, OFFICIAL_BANNERS } from '../config/banners.js';
 import { isAdmin, isStaff } from './permissions.js';
 import {
   DEFAULT_NVIDIA_MODEL,
@@ -34,6 +46,7 @@ const sectionLabels = {
   customization: 'Personalização',
   logs: 'Logs',
   missions: 'Missões',
+  banners: 'Gerenciamento de Banners',
 };
 
 const administratorSections = new Set([
@@ -44,6 +57,7 @@ const administratorSections = new Set([
   'customization',
   'logs',
   'missions',
+  'banners',
 ]);
 
 function row(component) {
@@ -181,7 +195,34 @@ function buildMetricsEmbed(db, guildId, section) {
   }
 
   if (section === 'feedback') {
-    embed.setDescription('O banco atual não possui um módulo de feedback.');
+    const feedback = db.prepare(`
+      SELECT order_id, user_id, rating, comment, submitted_at FROM order_feedback
+      WHERE guild_id = ? ORDER BY submitted_at DESC LIMIT 10
+    `).all(guildId);
+    const requests = metric(
+      db,
+      'SELECT COUNT(*) AS count FROM order_feedback_requests WHERE guild_id = ?',
+      guildId,
+    );
+    const average = db.prepare(`
+      SELECT AVG(rating) AS average FROM order_feedback WHERE guild_id = ?
+    `).get(guildId).average;
+    embed.setDescription([
+      `Solicitações iniciadas: **${requests}**`,
+      `Avaliações recebidas: **${feedback.length ? metric(db, 'SELECT COUNT(*) AS count FROM order_feedback WHERE guild_id = ?', guildId) : 0}** · média: **${average ? average.toFixed(2) : '—'} / 5**`,
+      ...(feedback.length ? feedback.map((entry) => (
+        `• ${entry.rating}/5 · pedido \`${entry.order_id}\` · <@${entry.user_id}> · ${entry.comment || 'sem comentário'} · <t:${Math.floor(Date.parse(entry.submitted_at) / 1000)}:R>`
+      )) : ['Nenhuma avaliação recebida.']),
+    ].join('\n').slice(0, 4000));
+    return embed;
+  }
+
+  if (section === 'banners') {
+    const overrides = getGuildSettings(db, guildId).settings.bannerUrls ?? {};
+    const lines = Object.entries(OFFICIAL_BANNERS).map(([key, banner]) => (
+      `• \`${key}\` · ${banner.label} · ${overrides[key] ? 'personalizado' : 'padrão oficial'}`
+    ));
+    embed.setDescription(lines.join('\n'));
     return embed;
   }
 
@@ -287,6 +328,219 @@ export function buildMatrixPanel() {
     components: [row(select)],
     allowedMentions: { parse: [] },
   };
+}
+
+function buildBannerManagementView(db, guildId, key = 'discord_accounts') {
+  const banner = OFFICIAL_BANNERS[key];
+  const { settings } = getGuildSettings(db, guildId);
+  const customized = Boolean(settings.bannerUrls?.[key]);
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('matrix:banner-select')
+    .setPlaceholder('Selecionar banner')
+    .addOptions(Object.entries(OFFICIAL_BANNERS).map(([value, entry]) => ({
+      label: entry.label,
+      value,
+      default: value === key,
+    })));
+  const preview = withBrandSignature(new EmbedBuilder()
+    .setColor(BRAND.colors.white)
+    .setTitle(`Banner · ${banner.label}`)
+    .setDescription(`Identificador: \`${key}\`\nOrigem: ${customized ? 'URL personalizada' : 'URL oficial VANTA'}`)
+    .setImage(getBannerUrl(db, guildId, key)));
+  return {
+    embeds: [preview],
+    components: [
+      row(select),
+      row(
+        new ButtonBuilder()
+          .setCustomId(`matrix:banner-preview:${key}`)
+          .setLabel('Visualizar')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`matrix:banner-change:${key}`)
+          .setLabel('Substituir URL')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(`matrix:banner-restore:${key}`)
+          .setLabel('Restaurar padrão')
+          .setStyle(ButtonStyle.Danger)
+          .setDisabled(!customized),
+      ),
+    ],
+    allowedMentions: { parse: [] },
+  };
+}
+
+function recordUnauthorizedMatrixAction(interaction, db) {
+  if (interaction.inGuild()) {
+    writeAuditLog(db, interaction.guildId, interaction.user.id, 'matrix.unauthorized_action', {
+      customId: interaction.customId,
+    });
+  }
+}
+
+async function handleBannerComponent(interaction, db) {
+  if (!interaction.inGuild() || !isAdmin(interaction, db)) {
+    recordUnauthorizedMatrixAction(interaction, db);
+    await interaction.reply({ content: 'Esta ação exige permissão administrativa.', ephemeral: true });
+    return true;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId === 'matrix:banner-select') {
+    const key = interaction.values[0];
+    if (!Object.hasOwn(OFFICIAL_BANNERS, key)) {
+      await interaction.reply({ content: 'Banner inválido.', ephemeral: true });
+      return true;
+    }
+    await interaction.update(buildBannerManagementView(db, interaction.guildId, key));
+    return true;
+  }
+
+  if (!interaction.isButton()) return false;
+  const [, action, keyOrDraftId] = interaction.customId.split(':');
+
+  if (action === 'banner-preview' || action === 'banner-restore' || action === 'banner-change') {
+    const key = keyOrDraftId;
+    if (!Object.hasOwn(OFFICIAL_BANNERS, key)) {
+      await interaction.reply({ content: 'Banner inválido.', ephemeral: true });
+      return true;
+    }
+    if (action === 'banner-preview') {
+      await interaction.reply({
+        embeds: buildBannerManagementView(db, interaction.guildId, key).embeds,
+        ephemeral: true,
+      });
+      return true;
+    }
+    if (action === 'banner-change') {
+      const input = new TextInputBuilder()
+        .setCustomId('url')
+        .setLabel('URL HTTPS da imagem')
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(500)
+        .setRequired(true);
+      const modal = new ModalBuilder()
+        .setCustomId(`matrix:banner-url:${key}`)
+        .setTitle(`Alterar · ${OFFICIAL_BANNERS[key].label}`)
+        .addComponents(new ActionRowBuilder().addComponents(input));
+      await interaction.showModal(modal);
+      return true;
+    }
+
+    const { settings } = getGuildSettings(db, interaction.guildId);
+    const bannerUrls = { ...(settings.bannerUrls ?? {}) };
+    const previousUrl = bannerUrls[key] ?? OFFICIAL_BANNERS[key].url;
+    delete bannerUrls[key];
+    withTransaction(db, () => {
+      updateGuildSettings(db, interaction.guildId, { bannerUrls });
+      writeAuditLog(db, interaction.guildId, interaction.user.id, 'banner.restored', {
+        key,
+        previousUrl,
+        restoredUrl: OFFICIAL_BANNERS[key].url,
+      });
+    });
+    await interaction.update(buildBannerManagementView(db, interaction.guildId, key));
+    return true;
+  }
+
+  if (action === 'banner-save' || action === 'banner-cancel') {
+    const draft = db.prepare('SELECT * FROM action_drafts WHERE id = ?')
+      .get(keyOrDraftId);
+    if (!draft || draft.guild_id !== interaction.guildId
+      || draft.user_id !== interaction.user.id || draft.status !== 'pending') {
+      await interaction.reply({ content: 'Esta prévia expirou ou não pertence a você.', ephemeral: true });
+      return true;
+    }
+    if (action === 'banner-cancel') {
+      db.prepare("UPDATE action_drafts SET status = 'rejected' WHERE id = ?").run(draft.id);
+      await interaction.update({ content: 'Alteração cancelada.', embeds: [], components: [] });
+      return true;
+    }
+    if (Date.parse(draft.expires_at) <= Date.now()) {
+      db.prepare("UPDATE action_drafts SET status = 'expired' WHERE id = ?").run(draft.id);
+      await interaction.reply({ content: 'Esta prévia expirou. Gere outra para salvar.', ephemeral: true });
+      return true;
+    }
+    const key = draft.target.slice('banner:'.length);
+    if (!Object.hasOwn(OFFICIAL_BANNERS, key)) {
+      await interaction.reply({ content: 'Banner inválido.', ephemeral: true });
+      return true;
+    }
+    const { settings } = getGuildSettings(db, interaction.guildId);
+    const bannerUrls = { ...(settings.bannerUrls ?? {}), [key]: draft.value };
+    withTransaction(db, () => {
+      updateGuildSettings(db, interaction.guildId, { bannerUrls });
+      db.prepare("UPDATE action_drafts SET status = 'applied' WHERE id = ?").run(draft.id);
+      writeAuditLog(db, interaction.guildId, interaction.user.id, 'banner.updated', {
+        key,
+        previousUrl: settings.bannerUrls?.[key] ?? OFFICIAL_BANNERS[key].url,
+        url: draft.value,
+      });
+    });
+    await interaction.update({
+      content: `Banner **${OFFICIAL_BANNERS[key].label}** salvo.`,
+      embeds: [],
+      components: [],
+    });
+    return true;
+  }
+  return false;
+}
+
+export async function handleMatrixModal(interaction, { db }) {
+  if (!interaction.customId.startsWith('matrix:banner-url:')) return false;
+  if (!interaction.inGuild() || !isAdmin(interaction, db)) {
+    recordUnauthorizedMatrixAction(interaction, db);
+    await interaction.reply({ content: 'Esta ação exige permissão administrativa.', ephemeral: true });
+    return true;
+  }
+  const key = interaction.customId.slice('matrix:banner-url:'.length);
+  const rawUrl = interaction.fields.getTextInputValue('url').trim();
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    await interaction.reply({ content: 'Informe uma URL válida.', ephemeral: true });
+    return true;
+  }
+  if (!Object.hasOwn(OFFICIAL_BANNERS, key) || url.protocol !== 'https:'
+    || url.username || url.password) {
+    await interaction.reply({ content: 'A imagem deve usar uma URL HTTPS válida.', ephemeral: true });
+    return true;
+  }
+
+  const id = randomUUID();
+  const now = new Date();
+  db.prepare(`
+    INSERT INTO action_drafts
+      (id, guild_id, user_id, channel_id, target, value, status, expires_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+  `).run(
+    id,
+    interaction.guildId,
+    interaction.user.id,
+    interaction.channelId,
+    `banner:${key}`,
+    url.href,
+    new Date(now.getTime() + 15 * 60_000).toISOString(),
+    now.toISOString(),
+  );
+  writeAuditLog(db, interaction.guildId, interaction.user.id, 'banner.previewed', { key, url: url.href });
+  const preview = withBrandSignature(new EmbedBuilder()
+    .setColor(BRAND.colors.white)
+    .setTitle(`Prévia · ${OFFICIAL_BANNERS[key].label}`)
+    .setDescription(`Identificador: \`${key}\`\nConfirme para salvar a URL.`)
+    .setImage(url.href));
+  await interaction.reply({
+    embeds: [preview],
+    components: [row(
+      new ButtonBuilder().setCustomId(`matrix:banner-save:${id}`).setLabel('Salvar').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`matrix:banner-cancel:${id}`).setLabel('Cancelar').setStyle(ButtonStyle.Secondary),
+    )],
+    ephemeral: true,
+    allowedMentions: { parse: [] },
+  });
+  return true;
 }
 
 function getMatrixChannelId(env = process.env) {
@@ -486,6 +740,9 @@ export async function buildHealthEmbed({
 }
 
 export async function handleMatrixInteraction(interaction, { db }) {
+  if (interaction.customId.startsWith('matrix:banner')) {
+    return handleBannerComponent(interaction, db);
+  }
   if (!interaction.isStringSelectMenu() || interaction.customId !== 'matrix:section') {
     return false;
   }
@@ -520,6 +777,14 @@ export async function handleMatrixInteraction(interaction, { db }) {
       guildId: interaction.guildId,
     });
     await interaction.editReply({ embeds: [embed] });
+    return true;
+  }
+
+  if (section === 'banners') {
+    await interaction.reply({
+      ...buildBannerManagementView(db, interaction.guildId),
+      ephemeral: true,
+    });
     return true;
   }
 

@@ -3,7 +3,14 @@ import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { ChannelType, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { commands } from '../src/commands/index.js';
-import { ensureMissionSchema, ensurePaymentSchema } from '../src/services/db.js';
+import { getBannerUrl, getCategoryBannerKey, OFFICIAL_BANNERS } from '../src/config/banners.js';
+import {
+  ensureCartNumberSchema,
+  ensureFeedbackSchema,
+  ensureMissionSchema,
+  ensureOrderSnapshotSchema,
+  ensurePaymentSchema,
+} from '../src/services/db.js';
 import {
   applyCartCoupon,
   calculateSalePrice,
@@ -27,9 +34,21 @@ import {
   buildHealthEmbed,
   buildMatrixPanel,
   handleMatrixInteraction,
+  handleMatrixModal,
   recoverMatrixPanel,
 } from '../src/services/matrix.js';
 import { ROLE_IDS } from '../src/services/permissions.js';
+import {
+  recordOrderFeedback,
+  scheduleClosedTicketDeletion,
+  sendOrderFeedbackRequest,
+} from '../src/services/feedback.js';
+import {
+  generateCommand,
+  orderCommand,
+  parseLocalPaymentDuration,
+  stockCommand,
+} from '../src/commands/operations.js';
 import {
   createAnnouncementPreview,
   handleAnnouncementInteraction,
@@ -142,6 +161,9 @@ function createDatabase() {
     );
   `);
   ensurePaymentSchema(db);
+  ensureFeedbackSchema(db);
+  ensureCartNumberSchema(db);
+  ensureOrderSnapshotSchema(db);
   ensureMissionSchema(db);
 
   return db;
@@ -174,6 +196,11 @@ test('default catalog seeds known stock once and never overwrites existing stock
   assert.equal(inserted, 26);
   assert.equal(ensureDefaultCatalog(db, 'guild-1'), 0);
 
+  const robuxStock = db.prepare(`
+    SELECT stock FROM products WHERE guild_id = ? AND name = 'Robux'
+  `).get('guild-1').stock;
+  assert.ok(robuxStock >= 5 && robuxStock <= 10);
+
   const spotify = db.prepare(`
     SELECT stock, cost_cents FROM products
     WHERE guild_id = ? AND name = ?
@@ -190,6 +217,9 @@ test('default catalog seeds known stock once and never overwrites existing stock
     UPDATE products SET stock = 9 WHERE guild_id = ? AND name = ?
   `).run('guild-1', 'Spotify Premium — 1 mês');
   assert.equal(ensureDefaultCatalog(db, 'guild-1'), 0);
+  assert.equal(db.prepare(
+    "SELECT stock FROM products WHERE guild_id = ? AND name = 'Robux'",
+  ).get('guild-1').stock, robuxStock);
   assert.equal(db.prepare(
     'SELECT stock FROM products WHERE guild_id = ? AND name = ?',
   ).get('guild-1', 'Spotify Premium — 1 mês').stock, 9);
@@ -359,6 +389,16 @@ test('checkout revalidates price, avoids duplicate tickets and releases coupon s
   assert.equal(duplicate.duplicate, true);
   assert.equal(first.orderId, duplicate.orderId);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM coupon_uses').get().count, 1);
+  const financialSnapshot = db.prepare(`
+    SELECT unit_price_cents, unit_cost_cents FROM order_items WHERE order_id = ?
+  `).get(first.orderId);
+  assert.equal(financialSnapshot.unit_price_cents, 1300);
+  assert.equal(financialSnapshot.unit_cost_cents, 1000);
+  db.prepare('UPDATE products SET cost_cents = 2000, price_cents = 2600 WHERE id = ?')
+    .run('product-1');
+  assert.equal(db.prepare(
+    'SELECT unit_cost_cents FROM order_items WHERE order_id = ?',
+  ).get(first.orderId).unit_cost_cents, 1000);
 
   db.prepare(`
     INSERT INTO payments
@@ -375,8 +415,158 @@ test('checkout revalidates price, avoids duplicate tickets and releases coupon s
   db.prepare("UPDATE payments SET status = 'expired' WHERE id = 'payment-1'").run();
 
   closeOrderTicket(db, 'guild-1', first.orderId, 'staff-1');
+  const feedbackRequest = db.prepare(`
+    SELECT id, status, user_id, channel_id FROM order_feedback_requests WHERE order_id = ?
+  `).get(first.orderId);
+  assert.equal(feedbackRequest.status, 'pending');
+  assert.equal(feedbackRequest.user_id, 'user-1');
+  assert.equal(feedbackRequest.channel_id, 'channel-1');
+  const dmMessages = [];
+  const feedbackClient = {
+    user: { id: 'bot-1' },
+    users: {
+      fetch: async () => ({ send: async (message) => { dmMessages.push(message); } }),
+    },
+  };
+  assert.equal(await sendOrderFeedbackRequest({ db, client: feedbackClient, orderId: first.orderId }), true);
+  assert.equal(db.prepare(
+    'SELECT status FROM order_feedback_requests WHERE order_id = ?',
+  ).get(first.orderId).status, 'delivered');
+  assert.equal(dmMessages[0].components[0].components.length, 5);
+  assert.equal(await sendOrderFeedbackRequest({ db, client: feedbackClient, orderId: first.orderId }), false);
+  assert.equal(closeOrderTicket(db, 'guild-1', first.orderId, 'staff-2').feedbackCreated, false);
+  assert.equal(db.prepare(
+    'SELECT COUNT(*) AS count FROM order_feedback_requests WHERE order_id = ?',
+  ).get(first.orderId).count, 1);
+  assert.deepEqual(recordOrderFeedback(db, feedbackRequest.id, 'other-user', 5), {
+    ok: false,
+    reason: 'not_found',
+  });
+  assert.equal(recordOrderFeedback(db, feedbackRequest.id, 'user-1', 5, 'Atendimento ótimo.').ok, true);
+  assert.deepEqual(recordOrderFeedback(db, feedbackRequest.id, 'user-1', 4), {
+    ok: false,
+    reason: 'duplicate',
+  });
+  assert.deepEqual({ ...db.prepare(`
+    SELECT rating, comment, user_id FROM order_feedback WHERE order_id = ?
+  `).get(first.orderId) }, {
+    rating: 5,
+    comment: 'Atendimento ótimo.',
+    user_id: 'user-1',
+  });
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM inventory_reservations').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM coupon_uses').get().count, 0);
+  db.close();
+});
+
+test('feedback falls back to its configured channel when DMs are closed and deletion is scheduled at 15 seconds', async () => {
+  const db = createDatabase();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO orders
+      (id, guild_id, user_id, status, subtotal_cents, discount_cents, total_cents, created_at)
+    VALUES ('order-dm-closed', 'guild-1', 'user-closed', 'in_service', 0, 0, 0, ?)
+  `).run(now);
+  db.prepare(`
+    INSERT INTO tickets (order_id, guild_id, channel_id, status, opened_at)
+    VALUES ('order-dm-closed', 'guild-1', 'cart-dm-closed', 'open', ?)
+  `).run(now);
+  const closed = closeOrderTicket(db, 'guild-1', 'order-dm-closed', 'staff-1');
+  let fallbackMessage;
+  const feedbackClient = {
+    user: { id: 'bot-1' },
+    users: { fetch: async () => { throw Object.assign(new Error('DM closed'), { code: 50007 }); } },
+    channels: {
+      fetch: async (id) => ({
+        id,
+        isTextBased: () => true,
+        isSendable: () => true,
+        send: async (message) => { fallbackMessage = message; },
+      }),
+    },
+  };
+  assert.equal(await sendOrderFeedbackRequest({
+    db,
+    client: feedbackClient,
+    orderId: 'order-dm-closed',
+    env: { VANTA_FEEDBACK_CHANNEL_ID: 'feedback-channel' },
+  }), true);
+  assert.equal(fallbackMessage.embeds[0].toJSON().title, 'VANTA | Como foi seu atendimento?');
+  assert.equal(db.prepare(
+    'SELECT failure_code FROM order_feedback_requests WHERE order_id = ?',
+  ).get('order-dm-closed').failure_code, '50007');
+
+  let scheduledDelay;
+  const delay = scheduleClosedTicketDeletion({
+    db,
+    client: feedbackClient,
+    ticket: closed,
+    now: Date.parse(closed.close_after_at) - 15_000,
+    setTimeoutImpl: (_callback, milliseconds) => {
+      scheduledDelay = milliseconds;
+      return { unref() {} };
+    },
+  });
+  assert.equal(delay, 15_000);
+  assert.equal(scheduledDelay, 15_000);
+  db.close();
+});
+
+test('cart channel numbering is unique under concurrency and resets only when all are closed', async () => {
+  const db = createDatabase();
+  const createdChannels = [];
+  const channelMap = new Map();
+  const guild = {
+    id: 'guild-1',
+    ownerId: 'owner-1',
+    roles: {
+      everyone: { id: 'guild-1' },
+      cache: { has: () => false },
+    },
+    channels: {
+      create: async (options) => {
+        const channel = {
+          id: `cart-channel-${createdChannels.length + 1}`,
+          send: async (message) => { channel.message = message; },
+          delete: async () => {},
+        };
+        createdChannels.push({ options, channel });
+        channelMap.set(channel.id, channel);
+        return channel;
+      },
+      fetch: async (id) => channelMap.get(id),
+    },
+  };
+
+  for (const [index, userId] of ['user-a', 'user-b', 'user-c'].entries()) {
+    const productId = `product-${index + 1}`;
+    addProduct(db, { id: productId, name: `Produto ${index + 1}`, stock: 5 });
+    setCartItem(db, 'guild-1', userId, productId, 1);
+  }
+  const botUserId = 'bot-1';
+  const [first, second] = await Promise.all(['user-a', 'user-b'].map((id) => (
+    createOrderTicket({ db, guild, user: { id }, botUserId })
+  )));
+  const activeTickets = db.prepare(`
+    SELECT cart_number, channel_id FROM tickets WHERE status = 'open' ORDER BY cart_number
+  `).all();
+  assert.deepEqual(activeTickets.map((ticket) => ticket.cart_number), [1, 2]);
+  assert.deepEqual(createdChannels.map(({ options }) => options.name), [
+    '🛒┃𝖢𝖺𝗋𝗋𝗂𝗇𝗁𝗈1',
+    '🛒┃𝖢𝖺𝗋𝗋𝗂𝗇𝗁𝗈2',
+  ]);
+  assert.match(channelMap.get(first.channel.id).message.content, /Olá! Seu carrinho foi criado com sucesso/);
+  const buttonLabels = createdChannels[0].channel.message.components[0].components
+    .map((button) => button.data.label);
+  assert.ok(buttonLabels.includes('Consultar carrinho'));
+  assert.ok(buttonLabels.includes('Chamar equipe'));
+  assert.ok(buttonLabels.includes('Cancelar carrinho'));
+  assert.ok(buttonLabels.includes('Encerrar carrinho'));
+
+  closeOrderTicket(db, 'guild-1', first.orderId, 'staff-1');
+  closeOrderTicket(db, 'guild-1', second.orderId, 'staff-1');
+  await createOrderTicket({ db, guild, user: { id: 'user-c' }, botUserId });
+  assert.equal(createdChannels[2].options.name, '🛒┃𝖢𝖺𝗋𝗋𝗂𝗇𝗁𝗈1');
   db.close();
 });
 
@@ -418,6 +608,9 @@ test('slash command registry contains no duplicate names', () => {
     'personalizar',
     'conversa',
     'missoes',
+    'gerar',
+    'pedido',
+    'estoque',
   ]);
   const config = commands.find(({ data }) => data.name === 'config').data.toJSON();
   assert.equal(config.options[0].name, 'center');
@@ -517,6 +710,197 @@ test('MATRIX roles are enforced and panel recovery updates instead of duplicatin
   };
   await handleMatrixInteraction(manager, { db });
   assert.match(denied.content, /permissão administrativa/);
+  db.close();
+});
+
+test('official category banners map distinctly and MATRIX changes preview, persist, and restore one key', async () => {
+  const db = createDatabase();
+  const expectedCategories = {
+    'Contas Discord': 'discord_accounts',
+    'Discord Nitro': 'discord_nitro',
+    'Impulsos de servidor': 'discord_boosts',
+    'Contas Spotify': 'spotify_accounts',
+    'Spotify Premium': 'spotify_premium',
+    'YouTube Premium': 'youtube_premium',
+    GamePass: 'roblox_gamepass',
+    Robux: 'robux',
+  };
+  for (const [category, key] of Object.entries(expectedCategories)) {
+    assert.equal(getCategoryBannerKey(category), key);
+    assert.match(OFFICIAL_BANNERS[key].url, /^https:\/\//);
+  }
+  assert.equal(new Set(Object.values(expectedCategories)).size, 8);
+  assert.equal(getBannerUrl(db, 'guild-1', 'payments'), OFFICIAL_BANNERS.payments.url);
+  assert.equal(getBannerUrl(db, 'guild-1', 'cart'), OFFICIAL_BANNERS.cart.url);
+  assert.equal(getBannerUrl(db, 'guild-1', 'contributor'), OFFICIAL_BANNERS.contributor.url);
+
+  const base = {
+    isStringSelectMenu: () => false,
+    isButton: () => false,
+    inGuild: () => true,
+    guildId: 'guild-1',
+    guild: { id: 'guild-1', ownerId: 'admin-1' },
+    user: { id: 'admin-1' },
+    member: { roles: { cache: new Map() }, permissions: new PermissionsBitField() },
+    memberPermissions: new PermissionsBitField(),
+  };
+  let panel;
+  await handleMatrixInteraction({
+    ...base,
+    isStringSelectMenu: () => true,
+    customId: 'matrix:section',
+    values: ['banners'],
+    reply: async (value) => { panel = value; },
+  }, { db });
+  assert.equal(panel.components[0].components[0].data.custom_id, 'matrix:banner-select');
+  assert.equal(panel.embeds[0].toJSON().image.url, OFFICIAL_BANNERS.discord_accounts.url);
+
+  let modal;
+  await handleMatrixInteraction({
+    ...base,
+    isButton: () => true,
+    customId: 'matrix:banner-change:discord_accounts',
+    showModal: async (value) => { modal = value; },
+  }, { db });
+  assert.equal(modal.data.custom_id, 'matrix:banner-url:discord_accounts');
+
+  let preview;
+  await handleMatrixModal({
+    ...base,
+    customId: modal.data.custom_id,
+    channelId: 'matrix-channel',
+    fields: { getTextInputValue: () => 'https://images.example.com/discord-accounts.png' },
+    reply: async (value) => { preview = value; },
+  }, { db });
+  assert.equal(preview.embeds[0].toJSON().image.url, 'https://images.example.com/discord-accounts.png');
+  const saveButton = preview.components[0].components[0].data.custom_id;
+  let response;
+  await handleMatrixInteraction({
+    ...base,
+    isButton: () => true,
+    customId: saveButton,
+    update: async (value) => { response = value; },
+  }, { db });
+  assert.equal(getBannerUrl(db, 'guild-1', 'discord_accounts'), 'https://images.example.com/discord-accounts.png');
+  assert.equal(getBannerUrl(db, 'guild-1', 'discord_nitro'), OFFICIAL_BANNERS.discord_nitro.url);
+
+  await handleMatrixInteraction({
+    ...base,
+    isButton: () => true,
+    customId: 'matrix:banner-restore:discord_accounts',
+    update: async (value) => { response = value; },
+  }, { db });
+  assert.equal(getBannerUrl(db, 'guild-1', 'discord_accounts'), OFFICIAL_BANNERS.discord_accounts.url);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action IN ('banner.updated', 'banner.restored')")
+    .get().count, 2);
+  db.close();
+});
+
+test('administrative Pix generation, authenticated order refresh, and stock audit work', async () => {
+  const db = createDatabase();
+  const paymentResponse = (overrides = {}) => ({
+    paymentId: 'generated-pix-1',
+    amount: 25,
+    status: 'pending',
+    copyPaste: '000201-test',
+    qrCodeBase64: 'data:image/png;base64,aGVsbG8=',
+    ...overrides,
+  });
+  const permissions = new PermissionsBitField(PermissionFlagsBits.Administrator);
+  const baseInteraction = {
+    inGuild: () => true,
+    guildId: 'guild-1',
+    guild: { id: 'guild-1', ownerId: 'admin-1' },
+    user: { id: 'admin-1', username: 'Admin', globalName: 'Admin' },
+    member: { roles: { cache: new Map() }, permissions },
+    memberPermissions: permissions,
+    deferReply: async () => {},
+  };
+  assert.equal(parseLocalPaymentDuration('30m'), 1_800_000);
+  assert.throws(() => parseLocalPaymentDuration('30s'), /prazo/);
+  let pixReply;
+  await generateCommand.execute({
+    ...baseInteraction,
+    options: {
+      getNumber: () => 25,
+      getString: () => '30m',
+    },
+    editReply: async (value) => { pixReply = value; },
+  }, {
+    db,
+    payments: {
+      providerOrder: ['zpay', 'voxpay'],
+      providers: {
+        zpay: {
+          environment: 'production',
+          async createPayment(input) {
+            assert.equal(input.amount, 25);
+            return paymentResponse();
+          },
+          async getPayment() {
+            return paymentResponse({
+              status: 'paid',
+              paidAt: new Date().toISOString(),
+            });
+          },
+        },
+      },
+    },
+  });
+  const order = db.prepare('SELECT * FROM orders').get();
+  const request = db.prepare('SELECT * FROM manual_payment_requests WHERE order_id = ?')
+    .get(order.id);
+  assert.ok(request);
+  assert.ok(pixReply?.embeds);
+  assert.match(pixReply.embeds[0].toJSON().description, /não altera a validade no provedor/);
+  assert.match(pixReply.embeds[0].toJSON().description, /Identificador da cobrança/);
+  assert.equal(db.prepare('SELECT provider FROM payments WHERE order_id = ?').get(order.id).provider, 'zpay');
+
+  let orderReply;
+  await orderCommand.execute({
+    ...baseInteraction,
+    options: {
+      getString: () => order.id,
+      getUser: () => null,
+    },
+    editReply: async (value) => { orderReply = value; },
+  }, {
+    db,
+    payments: {
+      providers: {
+        zpay: {
+          async getPayment() {
+            return paymentResponse({ status: 'paid', paidAt: new Date().toISOString() });
+          },
+        },
+      },
+    },
+  });
+  assert.match(orderReply.embeds[0].toJSON().description, /zpay · paid/);
+
+  addProduct(db, { stock: 5 });
+  let stockResponse;
+  await stockCommand.execute({
+    ...baseInteraction,
+    options: {
+      getSubcommand: () => 'ajustar',
+      getString: (name) => name === 'produto' ? 'product-1' : 'Reposição conferida',
+      getInteger: () => 12,
+    },
+    reply: async (value) => { stockResponse = value; },
+  }, { db });
+  assert.match(stockResponse.content, /atualizado para \*\*12\*\*/);
+  assert.equal(db.prepare('SELECT stock FROM products WHERE id = ?').get('product-1').stock, 12);
+  const stockAudit = db.prepare(`
+    SELECT details FROM audit_logs WHERE action = 'inventory.adjusted'
+  `).get();
+  assert.deepEqual(JSON.parse(stockAudit.details), {
+    productId: 'product-1',
+    productName: 'Produto',
+    previousStock: 5,
+    stock: 12,
+    reason: 'Reposição conferida',
+  });
   db.close();
 });
 

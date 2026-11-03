@@ -12,6 +12,10 @@ import { createPaymentProviders } from './services/paymentProviders.js';
 import { startPaymentWebhookServer } from './services/payments.js';
 import { startMissionMaintenance } from './services/missions.js';
 import { startMissionDiscovery } from './services/missionDiscovery.js';
+import {
+  recoverClosedTicketDeletions,
+  recoverPendingFeedbackRequests,
+} from './services/feedback.js';
 import { logError } from './utils/errorLogging.js';
 
 async function main() {
@@ -65,6 +69,10 @@ async function main() {
     });
     recoverMatrixPanel({ db, client }).catch((error) => {
       console.error(`Falha ao recuperar painel MATRIX (${error.name || 'UnknownError'}).`);
+    });
+    recoverClosedTicketDeletions({ db, client });
+    recoverPendingFeedbackRequests({ db, client }).catch((error) => {
+      console.error(`Falha ao recuperar avaliações pendentes (${error.name || 'UnknownError'}).`);
     });
   });
 

@@ -17,7 +17,6 @@ export const shopCommand = {
     ensureDefaultCatalog(services.db, interaction.guildId);
     await interaction.reply({
       ...buildShopView(services.db, interaction.guildId),
-      ephemeral: true,
     });
   },
 };
